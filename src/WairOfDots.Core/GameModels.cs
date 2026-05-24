@@ -17,6 +17,12 @@ public enum PlayerKind
     Ai
 }
 
+public enum GameMode
+{
+    HumanVsAi,
+    AiOnly
+}
+
 public enum PlayerDirective
 {
     Attack,
@@ -42,12 +48,18 @@ public enum TerrainKind
     Forest
 }
 
-public sealed record GameSettings(int Seed = 1337, int AiPlayers = 4, int MatchLengthTicks = 1800)
+public sealed record GameSettings(
+    int Seed = 1337,
+    int AiPlayers = 4,
+    int MatchLengthTicks = 1800,
+    GameMode Mode = GameMode.HumanVsAi)
 {
     public GameSettings Normalized()
         => this with
         {
-            AiPlayers = Math.Clamp(AiPlayers, 1, 8),
+            AiPlayers = Mode == GameMode.AiOnly
+                ? Math.Clamp(AiPlayers, 2, 8)
+                : Math.Clamp(AiPlayers, 1, 8),
             MatchLengthTicks = Math.Clamp(MatchLengthTicks, 120, 7200)
         };
 }
@@ -66,6 +78,18 @@ public readonly record struct GridPoint(int X, int Y)
 {
     public int ManhattanDistanceTo(GridPoint other)
         => Math.Abs(X - other.X) + Math.Abs(Y - other.Y);
+
+    public int ChebyshevDistanceTo(GridPoint other)
+        => Math.Max(Math.Abs(X - other.X), Math.Abs(Y - other.Y));
+
+    public double OctileDistanceTo(GridPoint other)
+    {
+        var dx = Math.Abs(X - other.X);
+        var dy = Math.Abs(Y - other.Y);
+        var diagonal = Math.Min(dx, dy);
+        var cardinal = Math.Max(dx, dy) - diagonal;
+        return cardinal + diagonal * Math.Sqrt(2);
+    }
 }
 
 public sealed record GridCell(
@@ -203,6 +227,11 @@ public sealed class TacticalUnit
     public int PathIndex { get; set; }
     public double StepProgress { get; set; }
     public MapPoint CurrentPosition { get; set; }
+    public GridPoint VisualFromCell { get; set; }
+    public GridPoint VisualToCell { get; set; }
+    public MapPoint VisualFromPosition { get; set; }
+    public MapPoint VisualToPosition { get; set; }
+    public int VisualMoveTick { get; set; } = -1;
     public double Health { get; set; }
     public double Morale { get; set; } = 1.0;
     public int? TargetCityId { get; set; }
@@ -211,6 +240,7 @@ public sealed class TacticalUnit
     public bool IsLeader => Kind is UnitKind.Commander or UnitKind.General;
     public int RemainingGridSteps => Math.Max(0, Path.Count - PathIndex - 1);
     public bool IsMoving => Path.Count > 1 && PathIndex < Path.Count - 1;
+    public bool HasVisualMovement => VisualMoveTick >= 0 && VisualFromPosition.DistanceTo(VisualToPosition) > 0.0001;
 
     public double Speed
         => Kind switch
@@ -297,6 +327,18 @@ public sealed record UnitSnapshot(
     int? TargetCityId,
     int RemainingGridSteps);
 
+public sealed record StandingSnapshot(
+    int PlayerId,
+    string Name,
+    string Kind,
+    bool IsEliminated,
+    double Score,
+    int CityCount,
+    int UnitCount,
+    double Resources,
+    double GeneralHealth,
+    string GenomeId);
+
 public sealed record MatchSnapshot(
     int Tick,
     string Phase,
@@ -310,7 +352,10 @@ public sealed record MatchSnapshot(
     string Fingerprint,
     IReadOnlyList<PlayerSnapshot> Players,
     IReadOnlyList<CitySnapshot> Cities,
-    IReadOnlyList<UnitSnapshot> Units);
+    IReadOnlyList<UnitSnapshot> Units,
+    string GameMode,
+    bool HasHumanPlayer,
+    IReadOnlyList<StandingSnapshot> Standings);
 
 public static class GameConstants
 {

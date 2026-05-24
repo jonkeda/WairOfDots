@@ -13,6 +13,7 @@ Use this checklist for player acceptance testing.
 - [ ] The title says `Wair of Dots`.
 - [ ] The seed field defaults to `1337`.
 - [ ] The AI player count defaults to `4`.
+- [ ] The `Human` checkbox defaults to checked.
 - [ ] `Settings` opens a settings panel.
 - [ ] `Back` returns to the main menu.
 - [ ] `Start Match` starts the game.
@@ -26,6 +27,9 @@ Use this checklist for player acceptance testing.
 - [ ] No grid cell visibly holds more than one unit marker.
 - [ ] At most one unit marker appears on a city diamond.
 - [ ] Moving units travel across the map grid rather than along city-to-city edges.
+- [ ] Moving unit markers glide between adjacent grid cells instead of snapping.
+- [ ] Moving units can travel diagonally across open grid corners.
+- [ ] Units do not move diagonally through blocked water/terrain corners or occupied unit corners.
 - [ ] No Oravey/debug camera instruction overlay appears over the map or HUD.
 - [ ] The HUD shows tick, phase, seed, AI count, score, resources, general health, directive, target, last event, and AI telemetry.
 - [ ] City buttons are visible.
@@ -45,10 +49,25 @@ Use this checklist for player acceptance testing.
 - [ ] Let the match run for at least 30 seconds.
 - [ ] Confirm ticks advance.
 - [ ] Confirm at least one moving unit marker changes grid position over time.
+- [ ] Confirm combat, city capture, and unit blocking still use grid cells while markers animate smoothly.
+- [ ] Confirm diagonal enemy neighbors can fight without stacking.
 - [ ] Confirm city ownership changes over time.
 - [ ] Confirm AI telemetry appears after the first planning interval.
 - [ ] Confirm combat/capture events appear in the last event text.
 - [ ] Confirm adjacent enemy units can fight without stacking onto the same cell.
+
+## AI-Only Mode
+
+- [ ] Return to the main menu.
+- [ ] Uncheck `Human`.
+- [ ] Start a match with seed `2026` and 4 AI players.
+- [ ] Confirm the HUD status includes `AiOnly`.
+- [ ] Confirm no human command buttons are visible.
+- [ ] Confirm spectator speed controls are visible.
+- [ ] Confirm standings are visible and list AI players.
+- [ ] Confirm city buttons inspect cities without changing human orders.
+- [ ] Let the match run until the first planning interval and confirm AI telemetry appears.
+- [ ] Restart and confirm the match stays AI-only with the same seed.
 
 ## Pause And Restart
 

@@ -73,6 +73,96 @@ public class SimulationTests
     }
 
     [Fact]
+    public void HumanMode_CreatesOneHumanAndConfiguredAiPlayers()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 42, AiPlayers: 4));
+
+        Assert.True(simulation.HasHumanPlayer);
+        Assert.Equal(GameMode.HumanVsAi, simulation.Settings.Mode);
+        Assert.Single(simulation.Players, player => player.Kind == PlayerKind.Human);
+        Assert.Equal(4, simulation.Players.Count(player => player.Kind == PlayerKind.Ai));
+        Assert.Equal("Human", simulation.Players[GameConstants.HumanPlayerId].Name);
+    }
+
+    [Fact]
+    public void AiOnly_CreatesNoHumanAndPlayerZeroIsAi()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 42, AiPlayers: 4, Mode: GameMode.AiOnly));
+
+        Assert.False(simulation.HasHumanPlayer);
+        Assert.Equal(GameMode.AiOnly, simulation.Settings.Mode);
+        Assert.DoesNotContain(simulation.Players, player => player.Kind == PlayerKind.Human);
+        Assert.Equal(PlayerKind.Ai, simulation.Players[0].Kind);
+        Assert.Equal("AI 0", simulation.Players[0].Name);
+    }
+
+    [Fact]
+    public void AiOnly_GivesEveryAiAUniqueGenomeId()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 42, AiPlayers: 4, Mode: GameMode.AiOnly));
+
+        Assert.Equal(4, simulation.Players.Select(player => player.GenomeId).Distinct().Count());
+        Assert.All(simulation.Players, player => Assert.StartsWith("neat-", player.GenomeId));
+    }
+
+    [Fact]
+    public void AiOnly_SameSeedProducesSameFingerprint()
+    {
+        var left = GameSimulation.Create(new GameSettings(Seed: 42, AiPlayers: 4, Mode: GameMode.AiOnly));
+        var right = GameSimulation.Create(new GameSettings(Seed: 42, AiPlayers: 4, Mode: GameMode.AiOnly));
+
+        left.Start();
+        right.Start();
+        left.Step(96);
+        right.Step(96);
+
+        Assert.Equal(left.CreateFingerprint(), right.CreateFingerprint());
+    }
+
+    [Fact]
+    public void AiOnly_DifferentSeedsProduceDifferentFingerprintsAfterPlanning()
+    {
+        var left = GameSimulation.Create(new GameSettings(Seed: 42, AiPlayers: 4, Mode: GameMode.AiOnly));
+        var right = GameSimulation.Create(new GameSettings(Seed: 99, AiPlayers: 4, Mode: GameMode.AiOnly));
+
+        left.Start();
+        right.Start();
+        left.Step(96);
+        right.Step(96);
+
+        Assert.NotEqual(left.CreateFingerprint(), right.CreateFingerprint());
+    }
+
+    [Fact]
+    public void AiOnly_AdvancesCapturesCitiesAndEnds()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 12, AiPlayers: 4, MatchLengthTicks: 120, Mode: GameMode.AiOnly));
+        simulation.Start();
+
+        simulation.Step(130);
+
+        Assert.True(simulation.Tick > 0);
+        Assert.True(simulation.Cities.Count(city => city.OwnerId != GameConstants.NeutralPlayerId) > simulation.Players.Count);
+        Assert.Equal(MatchPhase.Ended, simulation.Phase);
+        Assert.NotNull(simulation.WinnerId);
+    }
+
+    [Fact]
+    public void AiOnly_HumanCommandDoesNotChangeAiPlan()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 42, AiPlayers: 4, Mode: GameMode.AiOnly));
+        var directive = simulation.Players[0].Directive;
+        var target = simulation.Players[0].TargetCityId;
+        var preference = simulation.Players[0].LightPreference;
+
+        simulation.ApplyHumanCommand(new HumanCommand(PlayerDirective.Defend, TargetCityId: 3, LightPreference: 0.25));
+
+        Assert.Equal(directive, simulation.Players[0].Directive);
+        Assert.Equal(target, simulation.Players[0].TargetCityId);
+        Assert.Equal(preference, simulation.Players[0].LightPreference);
+    }
+
+    [Fact]
     public void AiPlanning_EmitsTelemetryWithDifferentGenomeIds()
     {
         var simulation = GameSimulation.Create(new GameSettings(Seed: 123, AiPlayers: 4));
@@ -197,6 +287,26 @@ public class SimulationTests
     }
 
     [Fact]
+    public void Dispatch_CanCreateDiagonalPathStep()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
+        var mover = simulation.Units.First(unit => unit.PlayerId == 0 && unit.Kind == UnitKind.General);
+        var enemyGeneral = simulation.Units.First(unit => unit.PlayerId == 1 && unit.Kind == UnitKind.General);
+        DisableOtherUnits(simulation, mover, enemyGeneral);
+        var targetCity = simulation.Cities[0];
+        var start = FindDiagonalApproachToCell(simulation, targetCity.GridPosition);
+        PlaceUnit(simulation, mover, start);
+        simulation.ApplyHumanCommand(new HumanCommand(PlayerDirective.Attack, TargetCityId: targetCity.Id));
+        simulation.Start();
+
+        simulation.Step(12);
+
+        Assert.True(mover.Path.Count >= 2);
+        Assert.True(IsDiagonalStep(mover.Path[0], mover.Path[1]));
+        Assert.Equal(targetCity.GridPosition, mover.Path[^1]);
+    }
+
+    [Fact]
     public void MovingUnits_AdvanceAcrossGridCells()
     {
         var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
@@ -217,6 +327,232 @@ public class SimulationTests
     }
 
     [Fact]
+    public void CompletedGridStep_RecordsVisualMovementBetweenCells()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
+        var mover = simulation.Units.First(unit => unit.PlayerId == 0 && unit.Kind == UnitKind.Infantry);
+        var general = simulation.Units.First(unit => unit.PlayerId == mover.PlayerId && unit.Kind == UnitKind.General);
+        DisableOtherUnits(simulation, mover, general);
+        var step = FindAdjacentMove(simulation, mover, cell => cell.MoveCost <= mover.Speed);
+        PlaceUnit(simulation, mover, step.Start);
+        mover.Path = [step.Start, step.Destination];
+        var startPosition = simulation.Grid.ToMapPoint(step.Start);
+        var destinationPosition = simulation.Grid.ToMapPoint(step.Destination);
+        simulation.Start();
+
+        simulation.Step(1);
+
+        Assert.Equal(step.Destination, mover.Cell);
+        Assert.Equal(step.Start, mover.VisualFromCell);
+        Assert.Equal(step.Destination, mover.VisualToCell);
+        Assert.Equal(startPosition, mover.VisualFromPosition);
+        Assert.Equal(destinationPosition, mover.VisualToPosition);
+        Assert.Equal(simulation.Tick, mover.VisualMoveTick);
+        Assert.True(mover.HasVisualMovement);
+    }
+
+    [Fact]
+    public void SlowGridStep_ChangesVisualPositionBeforeAuthoritativeCell()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
+        var mover = simulation.Units.First(unit => unit.PlayerId == 0 && unit.Kind == UnitKind.Tank);
+        var general = simulation.Units.First(unit => unit.PlayerId == mover.PlayerId && unit.Kind == UnitKind.General);
+        DisableOtherUnits(simulation, mover, general);
+        var step = FindAdjacentMove(simulation, mover, cell => cell.MoveCost > mover.Speed);
+        PlaceUnit(simulation, mover, step.Start);
+        mover.Path = [step.Start, step.Destination];
+        var startPosition = simulation.Grid.ToMapPoint(step.Start);
+        var destinationPosition = simulation.Grid.ToMapPoint(step.Destination);
+        simulation.Start();
+
+        simulation.Step(1);
+
+        Assert.Equal(step.Start, mover.Cell);
+        Assert.InRange(mover.StepProgress, 0.0001, 0.9999);
+        Assert.Equal(step.Start, mover.VisualFromCell);
+        Assert.Equal(step.Destination, mover.VisualToCell);
+        Assert.True(mover.CurrentPosition.DistanceTo(startPosition) > 0.01);
+        Assert.True(mover.CurrentPosition.DistanceTo(destinationPosition) > 0.01);
+        Assert.Equal(mover.CurrentPosition, mover.VisualToPosition);
+        Assert.True(mover.HasVisualMovement);
+    }
+
+    [Fact]
+    public void DiagonalGridStep_UsesSqrtTwoMovementCost()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
+        var mover = simulation.Units.First(unit => unit.PlayerId == 0 && unit.Kind == UnitKind.Tank);
+        var playerGeneral = simulation.Units.First(unit => unit.PlayerId == mover.PlayerId && unit.Kind == UnitKind.General);
+        var enemyGeneral = simulation.Units.First(unit => unit.PlayerId == 1 && unit.Kind == UnitKind.General);
+        DisableOtherUnits(simulation, mover, playerGeneral, enemyGeneral);
+        var step = FindOpenDiagonalMove(simulation);
+        PlaceUnit(simulation, mover, step.Start);
+        mover.Path = [step.Start, step.Destination];
+        var expectedProgress = mover.Speed / (simulation.Grid.MoveCost(step.Destination) * Math.Sqrt(2));
+        simulation.Start();
+
+        simulation.Step(1);
+
+        Assert.Equal(step.Start, mover.Cell);
+        Assert.Equal(expectedProgress, mover.StepProgress, precision: 6);
+        Assert.Equal(step.Destination, mover.VisualToCell);
+    }
+
+    [Fact]
+    public void DiagonalGridStep_IsBlockedByCornerTerrain()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
+        var mover = simulation.Units.First(unit => unit.PlayerId == 0 && unit.Kind == UnitKind.Tank);
+        var playerGeneral = simulation.Units.First(unit => unit.PlayerId == mover.PlayerId && unit.Kind == UnitKind.General);
+        var enemyGeneral = simulation.Units.First(unit => unit.PlayerId == 1 && unit.Kind == UnitKind.General);
+        DisableOtherUnits(simulation, mover, playerGeneral, enemyGeneral);
+        var step = FindTerrainBlockedDiagonalMove(simulation);
+        PlaceUnit(simulation, mover, step.Start);
+        mover.Path = [step.Start, step.Destination];
+        var startPosition = simulation.Grid.ToMapPoint(step.Start);
+        simulation.Start();
+
+        simulation.Step(1);
+
+        Assert.Equal(step.Start, mover.Cell);
+        Assert.False(mover.IsMoving);
+        Assert.Equal(startPosition, mover.CurrentPosition);
+        Assert.Equal(step.Start, mover.VisualToCell);
+    }
+
+    [Fact]
+    public void DiagonalGridStep_IsBlockedByOccupiedCornerCell()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
+        var mover = simulation.Units.First(unit => unit.PlayerId == 0 && unit.Kind == UnitKind.Tank);
+        var blocker = simulation.Units.First(unit => unit.PlayerId == 0 && unit.Kind == UnitKind.Infantry);
+        var playerGeneral = simulation.Units.First(unit => unit.PlayerId == mover.PlayerId && unit.Kind == UnitKind.General);
+        var enemyGeneral = simulation.Units.First(unit => unit.PlayerId == 1 && unit.Kind == UnitKind.General);
+        DisableOtherUnits(simulation, mover, blocker, playerGeneral, enemyGeneral);
+        var step = FindOpenDiagonalMove(simulation);
+        var sideCell = DiagonalSideCells(step.Start, step.Destination).First();
+        PlaceUnit(simulation, mover, step.Start);
+        PlaceUnit(simulation, blocker, sideCell);
+        mover.Path = [step.Start, step.Destination];
+        simulation.Start();
+
+        simulation.Step(1);
+
+        Assert.Equal(step.Start, mover.Cell);
+        Assert.False(mover.IsMoving);
+        AssertNoDuplicateOccupiedCells(simulation);
+    }
+
+    [Fact]
+    public void DiagonalGridStep_IsBlockedByReservedCornerCell()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
+        var mover = simulation.Units.First(unit => unit.PlayerId == 0 && unit.Kind == UnitKind.Infantry);
+        var reserver = simulation.Units.First(unit => unit.PlayerId == 0 && unit.Kind == UnitKind.Tank);
+        var playerGeneral = simulation.Units.First(unit => unit.PlayerId == mover.PlayerId && unit.Kind == UnitKind.General);
+        var enemyGeneral = simulation.Units.First(unit => unit.PlayerId == 1 && unit.Kind == UnitKind.General);
+        DisableOtherUnits(simulation, mover, reserver, playerGeneral, enemyGeneral);
+        var step = FindOpenDiagonalMove(simulation);
+        var reservedSide = DiagonalSideCells(step.Start, step.Destination).First();
+        var reservationStart = FindCardinalApproachToCell(
+            simulation,
+            reservedSide,
+            excluded: new HashSet<GridPoint> { step.Start, step.Destination });
+        PlaceUnit(simulation, mover, step.Start);
+        PlaceUnit(simulation, reserver, reservationStart);
+        mover.Path = [step.Start, step.Destination];
+        reserver.Path = [reservationStart, reservedSide];
+        reserver.StepProgress = 0.1;
+        simulation.Start();
+
+        simulation.Step(1);
+
+        Assert.Equal(step.Start, mover.Cell);
+        Assert.False(mover.IsMoving);
+        AssertNoDuplicateOccupiedCells(simulation);
+    }
+
+    [Fact]
+    public void BlockedGridStep_ClearsVisualMovementAndKeepsAuthoritativeCell()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
+        var mover = simulation.Units.First(unit => unit.PlayerId == 0 && unit.Kind == UnitKind.Tank);
+        var blocker = simulation.Units.First(unit => unit.PlayerId == 0 && unit.Kind == UnitKind.Infantry);
+        var general = simulation.Units.First(unit => unit.PlayerId == mover.PlayerId && unit.Kind == UnitKind.General);
+        DisableOtherUnits(simulation, mover, blocker, general);
+        var step = FindAdjacentPair(simulation, mover, blocker);
+        PlaceUnit(simulation, mover, step.Attacker);
+        PlaceUnit(simulation, blocker, step.Defender);
+
+        var startPosition = simulation.Grid.ToMapPoint(step.Attacker);
+        var blockedPosition = simulation.Grid.ToMapPoint(step.Defender);
+        var midway = new MapPoint(
+            (startPosition.X + blockedPosition.X) / 2,
+            (startPosition.Y + blockedPosition.Y) / 2);
+        mover.Path = [step.Attacker, step.Defender];
+        mover.StepProgress = 0.5;
+        mover.CurrentPosition = midway;
+        mover.VisualFromCell = step.Attacker;
+        mover.VisualToCell = step.Defender;
+        mover.VisualFromPosition = startPosition;
+        mover.VisualToPosition = midway;
+        mover.VisualMoveTick = 0;
+        simulation.Start();
+
+        simulation.Step(1);
+
+        Assert.Equal(step.Attacker, mover.Cell);
+        Assert.False(mover.IsMoving);
+        Assert.Equal(0, mover.StepProgress);
+        Assert.Equal(startPosition, mover.CurrentPosition);
+        Assert.Equal(step.Attacker, mover.VisualFromCell);
+        Assert.Equal(step.Attacker, mover.VisualToCell);
+        Assert.Equal(startPosition, mover.VisualFromPosition);
+        Assert.Equal(startPosition, mover.VisualToPosition);
+        Assert.Equal(-1, mover.VisualMoveTick);
+    }
+
+    [Fact]
+    public void AdjacentCombat_ClearsPartialVisualMovementAtAuthoritativeCell()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
+        var mover = simulation.Units.First(unit => unit.PlayerId == 0 && unit.Kind == UnitKind.Tank);
+        var defender = simulation.Units.First(unit => unit.PlayerId == 1 && unit.Kind == UnitKind.Infantry);
+        var playerGeneral = simulation.Units.First(unit => unit.PlayerId == mover.PlayerId && unit.Kind == UnitKind.General);
+        var defenderGeneral = simulation.Units.First(unit => unit.PlayerId == defender.PlayerId && unit.Kind == UnitKind.General);
+        DisableOtherUnits(simulation, mover, defender, playerGeneral, defenderGeneral);
+        var step = FindAdjacentPair(simulation, mover, defender);
+        PlaceUnit(simulation, mover, step.Attacker);
+        PlaceUnit(simulation, defender, step.Defender);
+
+        var startPosition = simulation.Grid.ToMapPoint(step.Attacker);
+        var defenderPosition = simulation.Grid.ToMapPoint(step.Defender);
+        var midway = new MapPoint(
+            (startPosition.X + defenderPosition.X) / 2,
+            (startPosition.Y + defenderPosition.Y) / 2);
+        mover.Path = [step.Attacker, step.Defender];
+        mover.StepProgress = 0.5;
+        mover.CurrentPosition = midway;
+        mover.VisualFromCell = step.Attacker;
+        mover.VisualToCell = step.Defender;
+        mover.VisualFromPosition = startPosition;
+        mover.VisualToPosition = midway;
+        mover.VisualMoveTick = 0;
+        var defenderHealth = defender.Health;
+        simulation.Start();
+
+        simulation.Step(1);
+
+        Assert.True(defender.Health < defenderHealth);
+        Assert.Equal(step.Attacker, mover.Cell);
+        Assert.False(mover.IsMoving);
+        Assert.Equal(startPosition, mover.CurrentPosition);
+        Assert.Equal(step.Attacker, mover.VisualFromCell);
+        Assert.Equal(step.Attacker, mover.VisualToCell);
+        Assert.Equal(-1, mover.VisualMoveTick);
+    }
+
+    [Fact]
     public void AdjacentEnemyUnits_AttackEachOther()
     {
         var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
@@ -226,6 +562,26 @@ public class SimulationTests
         var pair = FindAdjacentPair(simulation, attacker, defender);
         PlaceUnit(simulation, attacker, pair.Attacker);
         PlaceUnit(simulation, defender, pair.Defender);
+        var defenderHealth = defender.Health;
+        simulation.Start();
+
+        simulation.Step(1);
+
+        Assert.True(defender.Health < defenderHealth);
+    }
+
+    [Fact]
+    public void DiagonalEnemyUnits_AttackEachOther()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
+        var attacker = simulation.Units.First(unit => unit.PlayerId == 0 && unit.Kind == UnitKind.Infantry);
+        var defender = simulation.Units.First(unit => unit.PlayerId == 1 && unit.Kind == UnitKind.Infantry);
+        var playerGeneral = simulation.Units.First(unit => unit.PlayerId == attacker.PlayerId && unit.Kind == UnitKind.General);
+        var defenderGeneral = simulation.Units.First(unit => unit.PlayerId == defender.PlayerId && unit.Kind == UnitKind.General);
+        DisableOtherUnits(simulation, attacker, defender, playerGeneral, defenderGeneral);
+        var step = FindOpenDiagonalMove(simulation);
+        PlaceUnit(simulation, attacker, step.Start);
+        PlaceUnit(simulation, defender, step.Destination);
         var defenderHealth = defender.Health;
         simulation.Start();
 
@@ -408,6 +764,121 @@ public class SimulationTests
         throw new InvalidOperationException($"No adjacent passable pair found for {defenderCellPredicate}.");
     }
 
+    private static (GridPoint Start, GridPoint Destination) FindAdjacentMove(
+        GameSimulation simulation,
+        TacticalUnit mover,
+        Func<GridCell, bool> destinationPredicate)
+    {
+        var occupied = simulation.Units
+            .Where(unit => unit.IsAlive && unit.Id != mover.Id)
+            .Select(unit => unit.Cell)
+            .ToHashSet();
+
+        foreach (var destinationCell in simulation.Grid.Cells
+                     .Where(cell => cell.IsPassable && destinationPredicate(cell) && !occupied.Contains(cell.Point))
+                     .OrderBy(cell => cell.Point.Y)
+                     .ThenBy(cell => cell.Point.X))
+        {
+            foreach (var start in AdjacentCells(destinationCell.Point)
+                         .Where(point => simulation.Grid.IsPassable(point) && !occupied.Contains(point))
+                         .OrderBy(point => point.Y)
+                         .ThenBy(point => point.X))
+            {
+                return (start, destinationCell.Point);
+            }
+        }
+
+        throw new InvalidOperationException("No adjacent movement pair found.");
+    }
+
+    private static GridPoint FindDiagonalApproachToCell(GameSimulation simulation, GridPoint destination)
+    {
+        foreach (var start in DiagonalCells(destination)
+                     .Where(point => simulation.Grid.IsPassable(point))
+                     .OrderBy(point => point.Y)
+                     .ThenBy(point => point.X))
+        {
+            if (DiagonalSideCells(start, destination).All(simulation.Grid.IsPassable))
+                return start;
+        }
+
+        throw new InvalidOperationException("No diagonal approach found.");
+    }
+
+    private static (GridPoint Start, GridPoint Destination) FindOpenDiagonalMove(GameSimulation simulation)
+    {
+        var occupied = simulation.Units
+            .Where(unit => unit.IsAlive)
+            .Select(unit => unit.Cell)
+            .ToHashSet();
+
+        foreach (var startCell in simulation.Grid.Cells
+                     .Where(cell => cell.IsPassable && !occupied.Contains(cell.Point))
+                     .OrderBy(cell => cell.Point.Y)
+                     .ThenBy(cell => cell.Point.X))
+        {
+            foreach (var destination in DiagonalCells(startCell.Point)
+                         .Where(point => simulation.Grid.IsPassable(point) && !occupied.Contains(point))
+                         .OrderBy(point => point.Y)
+                         .ThenBy(point => point.X))
+            {
+                if (DiagonalSideCells(startCell.Point, destination).All(side =>
+                        simulation.Grid.IsPassable(side) && !occupied.Contains(side)))
+                    return (startCell.Point, destination);
+            }
+        }
+
+        throw new InvalidOperationException("No open diagonal movement pair found.");
+    }
+
+    private static (GridPoint Start, GridPoint Destination) FindTerrainBlockedDiagonalMove(GameSimulation simulation)
+    {
+        var occupied = simulation.Units
+            .Where(unit => unit.IsAlive)
+            .Select(unit => unit.Cell)
+            .ToHashSet();
+
+        foreach (var startCell in simulation.Grid.Cells
+                     .Where(cell => cell.IsPassable && !occupied.Contains(cell.Point))
+                     .OrderBy(cell => cell.Point.Y)
+                     .ThenBy(cell => cell.Point.X))
+        {
+            foreach (var destination in DiagonalCells(startCell.Point)
+                         .Where(point => simulation.Grid.IsPassable(point) && !occupied.Contains(point))
+                         .OrderBy(point => point.Y)
+                         .ThenBy(point => point.X))
+            {
+                if (DiagonalSideCells(startCell.Point, destination).Any(side => !simulation.Grid.IsPassable(side)))
+                    return (startCell.Point, destination);
+            }
+        }
+
+        throw new InvalidOperationException("No terrain-blocked diagonal movement pair found.");
+    }
+
+    private static GridPoint FindCardinalApproachToCell(
+        GameSimulation simulation,
+        GridPoint destination,
+        IReadOnlySet<GridPoint> excluded)
+    {
+        var occupied = simulation.Units
+            .Where(unit => unit.IsAlive)
+            .Select(unit => unit.Cell)
+            .ToHashSet();
+
+        foreach (var start in AdjacentCells(destination)
+                     .Where(point => simulation.Grid.IsPassable(point) &&
+                         !excluded.Contains(point) &&
+                         !occupied.Contains(point))
+                     .OrderBy(point => point.Y)
+                     .ThenBy(point => point.X))
+        {
+            return start;
+        }
+
+        throw new InvalidOperationException("No cardinal approach found.");
+    }
+
     private static (GridPoint Attacker, GridPoint Defender) FindSeparatedPair(
         GameSimulation simulation,
         TacticalUnit attacker,
@@ -441,6 +912,11 @@ public class SimulationTests
         unit.Path = [];
         unit.PathIndex = 0;
         unit.StepProgress = 0;
+        unit.VisualFromCell = cell;
+        unit.VisualToCell = cell;
+        unit.VisualFromPosition = unit.CurrentPosition;
+        unit.VisualToPosition = unit.CurrentPosition;
+        unit.VisualMoveTick = -1;
     }
 
     private static IEnumerable<GridPoint> AdjacentCells(GridPoint point)
@@ -449,5 +925,22 @@ public class SimulationTests
         yield return new GridPoint(point.X + 1, point.Y);
         yield return new GridPoint(point.X, point.Y + 1);
         yield return new GridPoint(point.X - 1, point.Y);
+    }
+
+    private static IEnumerable<GridPoint> DiagonalCells(GridPoint point)
+    {
+        yield return new GridPoint(point.X - 1, point.Y - 1);
+        yield return new GridPoint(point.X + 1, point.Y - 1);
+        yield return new GridPoint(point.X + 1, point.Y + 1);
+        yield return new GridPoint(point.X - 1, point.Y + 1);
+    }
+
+    private static bool IsDiagonalStep(GridPoint from, GridPoint to)
+        => Math.Abs(from.X - to.X) == 1 && Math.Abs(from.Y - to.Y) == 1;
+
+    private static IEnumerable<GridPoint> DiagonalSideCells(GridPoint from, GridPoint to)
+    {
+        yield return new GridPoint(from.X, to.Y);
+        yield return new GridPoint(to.X, from.Y);
     }
 }

@@ -9,7 +9,8 @@ You are the Human General. Capture the map's city points, outscore the AI genera
 1. Launch `WairOfDots.Windows`.
 2. Enter a seed if you want a reproducible match.
 3. Enter the AI player count. The default is `4`.
-4. Select `Start Match`.
+4. Leave `Human` checked for the normal human-vs-AI match, or uncheck it for AI-only spectator mode.
+5. Select `Start Match`.
 
 ## Read The HUD
 
@@ -26,6 +27,20 @@ You are the Human General. Capture the map's city points, outscore the AI genera
 - `Directive`: your current order.
 - `Target`: the city your army is prioritizing.
 - `Infantry`: your current infantry production preference.
+
+## AI-Only Mode
+
+Uncheck `Human` on the start menu to watch an AI-only match. Player `0` becomes `AI 0`, every player uses a deterministic genome, and you watch as a spectator.
+
+AI-only mode replaces human command buttons with speed controls and standings. City buttons inspect cities instead of issuing orders.
+
+Use:
+
+- `Slower`: reduce spectator speed.
+- `Normal`: return to 1x speed.
+- `Faster`: increase spectator speed.
+- `Pause`: freeze the simulation.
+- `Restart`: restart the same seed, AI count, and mode.
 
 ## Commands
 
@@ -61,9 +76,13 @@ Only one unit can occupy a city cell at a time. You can select a city either fro
 
 ## Movement
 
-Units travel across the map grid instead of jumping along city edges. Water blocks movement, roads are fastest, grass is normal, and forest, hill, and rock slow units down.
+Units travel across the map grid instead of jumping along city edges. They can move north, south, east, west, and diagonally. Diagonal movement costs a little more than straight movement, so it feels natural without becoming a free speed boost.
 
-Each grid cell can hold only one unit. Friendly units block movement, and enemies attack from adjacent cells instead of stacking into the same cell. Terrain also changes combat attack and defense.
+Water blocks movement, roads are fastest, grass is normal, and forest, hill, and rock slow units down. Units cannot cut diagonally through blocked or occupied corners.
+
+Unit markers glide between adjacent grid cells for readability. The underlying tactics still use grid cells: occupancy, city capture, and combat resolve from the unit's current cell.
+
+Each grid cell can hold only one unit. Friendly units block movement, and enemies attack from adjacent cells, including diagonal neighbors, instead of stacking into the same cell. Terrain also changes combat attack and defense.
 
 ## Winning
 

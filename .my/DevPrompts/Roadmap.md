@@ -10,8 +10,9 @@ Build a complete local single-player Stride game where one human General compete
 - [x] Fixed-tick game loop.
 - [x] Default map with cities, edges, homes, and neutral control points.
 - [x] Human player plus scenario-configurable AI players.
+- [x] AI-only spectator mode with player `0` controlled by AI.
 - [x] Infantry, tank, commander, and general tactical units.
-- [x] City production, grid movement, adjacent combat, capture, and victory.
+- [x] City production, eight-way grid movement, adjacent combat, capture, and victory.
 - [x] Commander and General unit health states.
 - [x] NEAT-style deterministic genome controllers for AI players.
 - [x] Replay/fingerprint support for test determinism.
@@ -20,6 +21,7 @@ Build a complete local single-player Stride game where one human General compete
 
 - [x] Windows Stride host.
 - [x] Main menu with seed and AI player count.
+- [x] Human checkbox for switching between human-vs-AI and AI-only mode.
 - [x] General-mode HUD.
 - [x] City target selection.
 - [x] Attack, Hold, and Defend directives.
@@ -29,8 +31,8 @@ Build a complete local single-player Stride game where one human General compete
 
 ## Milestone 3: Tests
 
-- [x] Unit tests for simulation, determinism, AI, occupancy, combat/capture, and pause behavior.
-- [x] Brinell UI tests for launch, start, HUD, deterministic seed, occupancy, combat, pause, restart, and directive interaction.
+- [x] Unit tests for simulation, determinism, AI, occupancy, diagonal movement, combat/capture, and pause behavior.
+- [x] Brinell UI tests for launch, start, HUD, deterministic seed, occupancy, diagonal movement, combat, AI-only mode, pause, restart, and directive interaction.
 
 ## Milestone 4: Player Acceptance
 
@@ -41,6 +43,7 @@ Build a complete local single-player Stride game where one human General compete
 
 - [ ] Long-running SharpNEAT training runner.
 - [ ] Multi-tier General, Commander, and Dot genome training phases.
+- [ ] Any-angle path smoothing beyond eight-way movement.
 - [ ] Richer visual map rendering with animated unit travel.
 - [ ] Commander-mode and Dot-mode human play.
 - [ ] Saved match replay viewer.

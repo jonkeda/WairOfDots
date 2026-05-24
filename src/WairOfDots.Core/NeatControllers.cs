@@ -62,7 +62,8 @@ public sealed class GenomeNeatController : IAiController
     public static GenomeNeatController Create(int seed, int playerId)
     {
         var archetypes = new[] { "rush", "turtle", "opportunist", "decap" };
-        var archetype = archetypes[(playerId - 1) % archetypes.Length];
+        var archetypeIndex = playerId <= 0 ? 0 : (playerId - 1) % archetypes.Length;
+        var archetype = archetypes[archetypeIndex];
         var rng = new Random(HashCode.Combine(seed, playerId, archetype));
         var weights = Enumerable.Range(0, 10).Select(_ => rng.NextDouble() * 2 - 1).ToArray();
 

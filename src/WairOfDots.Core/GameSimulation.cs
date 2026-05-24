@@ -9,6 +9,7 @@ public sealed class GameSimulation
     private const int PlanningInterval = 12;
     private const double InfantryCost = 2.0;
     private const double TankCost = 4.0;
+    private const double DiagonalMoveMultiplier = 1.4142135623730951;
 
     private readonly List<CityNode> _cities;
     private readonly IReadOnlyList<TerrainPatch> _terrain;
@@ -56,6 +57,7 @@ public sealed class GameSimulation
     public IReadOnlyList<TelemetryEvent> Telemetry => _telemetry;
     public string LastEvent => _lastEvent;
     public int ActiveCombatCount => _activeCombatCount;
+    public bool HasHumanPlayer => Settings.Mode == GameMode.HumanVsAi;
     public int MovingUnitCount => _units.Count(unit => UnitParticipates(unit) && unit.IsMoving);
     public int MovingUnitGridStepCount => _units
         .Where(unit => UnitParticipates(unit) && unit.IsMoving)
@@ -64,7 +66,10 @@ public sealed class GameSimulation
     public static GameSimulation Create(GameSettings settings)
     {
         var normalized = settings.Normalized();
-        var map = GameMapFactory.CreateDefault(normalized.AiPlayers + 1);
+        var playerCount = normalized.Mode == GameMode.AiOnly
+            ? normalized.AiPlayers
+            : normalized.AiPlayers + 1;
+        var map = GameMapFactory.CreateDefault(playerCount);
         return new GameSimulation(normalized, map);
     }
 
@@ -102,6 +107,12 @@ public sealed class GameSimulation
 
     public void ApplyHumanCommand(HumanCommand command)
     {
+        if (!HasHumanPlayer)
+        {
+            _lastEvent = "AI-only mode ignores human orders";
+            return;
+        }
+
         var human = Human;
         if (command.Directive.HasValue)
             human.Directive = command.Directive.Value;
@@ -145,8 +156,8 @@ public sealed class GameSimulation
                 city.Id,
                 city.Name,
                 city.OwnerId,
-                CountUnitsOnCity(city, GameConstants.HumanPlayerId),
-                CountEnemyUnitsOnCity(city, GameConstants.HumanPlayerId),
+                HasHumanPlayer ? CountUnitsOnCity(city, GameConstants.HumanPlayerId) : 0,
+                HasHumanPlayer ? CountEnemyUnitsOnCity(city, GameConstants.HumanPlayerId) : CountAllUnitsOnCity(city),
                 CountAllUnitsOnCity(city),
                 city.Neighbors.ToArray()))
             .ToList();
@@ -166,26 +177,32 @@ public sealed class GameSimulation
                 unit.RemainingGridSteps))
             .ToList();
 
+        var human = HasHumanPlayer ? Human : null;
+        var standings = CreateStandings();
+
         return new MatchSnapshot(
             Tick,
             Phase.ToString(),
             WinnerId,
             WinnerId.HasValue ? _players[WinnerId.Value].Name : "",
-            Human.TargetCityId,
-            Human.Directive.ToString(),
-            Math.Round(Human.LightPreference, 2),
+            human?.TargetCityId ?? 0,
+            human?.Directive.ToString() ?? "",
+            human == null ? 0 : Math.Round(human.LightPreference, 2),
             MovingUnitCount,
             _lastEvent,
             CreateFingerprint(),
             playerSnapshots,
             citySnapshots,
-            unitSnapshots);
+            unitSnapshots,
+            Settings.Mode.ToString(),
+            HasHumanPlayer,
+            standings);
     }
 
     public string CreateFingerprint()
     {
         var builder = new StringBuilder();
-        builder.Append(CultureInfo.InvariantCulture, $"{Tick}|{Phase}|{WinnerId}|");
+        builder.Append(CultureInfo.InvariantCulture, $"{Tick}|{Phase}|{WinnerId}|{Settings.Mode}|");
         foreach (var player in _players.OrderBy(p => p.Id))
         {
             builder.Append(CultureInfo.InvariantCulture,
@@ -209,6 +226,14 @@ public sealed class GameSimulation
 
     private static IEnumerable<PlayerState> CreatePlayers(GameSettings settings, IReadOnlyList<int> homeCityIds)
     {
+        if (settings.Mode == GameMode.AiOnly)
+        {
+            for (var i = 0; i < settings.AiPlayers; i++)
+                yield return new PlayerState(i, $"AI {i}", PlayerKind.Ai, homeCityIds[i], GenomeNeatController.Create(settings.Seed, i).GenomeId);
+
+            yield break;
+        }
+
         yield return new PlayerState(0, "Human", PlayerKind.Human, homeCityIds[0], "human-general");
 
         for (var i = 1; i <= settings.AiPlayers; i++)
@@ -250,6 +275,10 @@ public sealed class GameSimulation
             CurrentPosition = _grid.ToMapPoint(cell),
             Health = TacticalUnit.DefaultHealth(kind)
         };
+        unit.VisualFromCell = cell;
+        unit.VisualToCell = cell;
+        unit.VisualFromPosition = unit.CurrentPosition;
+        unit.VisualToPosition = unit.CurrentPosition;
 
         _units.Add(unit);
         return unit;
@@ -318,6 +347,7 @@ public sealed class GameSimulation
     private void MoveUnits()
     {
         var occupied = BuildOccupiedCells();
+        var continuingReservations = BuildMovingDestinationReservations();
         var reservedDestinations = new HashSet<GridPoint>();
         foreach (var unit in _units
                      .Where(UnitParticipates)
@@ -325,7 +355,10 @@ public sealed class GameSimulation
                      .ThenBy(unit => unit.Id))
         {
             if (FindAdjacentEnemy(unit, occupied) != null)
+            {
+                ClearPath(unit, resetVisualState: true);
                 continue;
+            }
 
             if (unit.TargetCityId.HasValue)
                 EnsureUnitPath(unit);
@@ -333,16 +366,17 @@ public sealed class GameSimulation
             if (!unit.IsMoving)
                 continue;
 
+            var visualFromCell = unit.Cell;
+            var visualFromPosition = unit.CurrentPosition;
             var nextCell = unit.Path[unit.PathIndex + 1];
-            if (!_grid.IsPassable(nextCell) ||
-                reservedDestinations.Contains(nextCell) ||
-                IsOccupiedByOtherUnit(nextCell, unit.Id, occupied))
+            if (!CanEnterNextCell(unit, nextCell, occupied, continuingReservations, reservedDestinations))
             {
-                ClearPath(unit);
+                ClearPath(unit, resetVisualState: true);
                 continue;
             }
 
-            var moveCost = Math.Max(0.1, _grid.MoveCost(nextCell));
+            reservedDestinations.Add(nextCell);
+            var moveCost = MoveStepCost(unit.Cell, nextCell);
             unit.StepProgress += unit.Speed / moveCost;
             if (unit.StepProgress >= 1.0)
             {
@@ -352,7 +386,7 @@ public sealed class GameSimulation
                 unit.StepProgress = 0;
                 unit.CurrentPosition = _grid.ToMapPoint(unit.Cell);
                 occupied[unit.Cell] = unit;
-                reservedDestinations.Add(unit.Cell);
+                RecordVisualMovement(unit, visualFromCell, nextCell, visualFromPosition);
 
                 if (!unit.IsMoving)
                     ClearPath(unit);
@@ -363,6 +397,7 @@ public sealed class GameSimulation
                     _grid.ToMapPoint(unit.Cell),
                     _grid.ToMapPoint(nextCell),
                     unit.StepProgress);
+                RecordVisualMovement(unit, visualFromCell, nextCell, visualFromPosition);
             }
         }
     }
@@ -490,7 +525,7 @@ public sealed class GameSimulation
         var cityObservations = _cities
             .Select(city =>
             {
-                var distance = city.GridPosition.ManhattanDistanceTo(commanderCell);
+                var distance = city.GridPosition.OctileDistanceTo(commanderCell);
                 return new CityObservation(
                     city.Id,
                     city.OwnerId == player.Id ? 1 : 0,
@@ -519,7 +554,7 @@ public sealed class GameSimulation
         if (player.Directive == PlayerDirective.Hold)
         {
             foreach (var unit in _units.Where(unit => UnitParticipates(unit) && unit.PlayerId == player.Id))
-                ClearPath(unit);
+                ClearPath(unit, resetVisualState: true);
             return;
         }
 
@@ -557,7 +592,7 @@ public sealed class GameSimulation
         var origin = GetLeaderUnit(player, UnitKind.Commander)?.Cell ?? _cities[player.HomeCityId].GridPosition;
         return _cities
             .Where(city => city.OwnerId != player.Id)
-            .OrderBy(city => city.GridPosition.ManhattanDistanceTo(origin))
+            .OrderBy(city => city.GridPosition.OctileDistanceTo(origin))
             .ThenBy(city => city.Id)
             .FirstOrDefault()
             ?? _cities[player.HomeCityId];
@@ -594,7 +629,7 @@ public sealed class GameSimulation
         var destination = SelectDestinationCell(unit, target);
         if (!destination.HasValue || destination.Value == unit.Cell)
         {
-            ClearPath(unit);
+            ClearPath(unit, resetVisualState: true);
             unit.TargetCityId = target.Id;
             return;
         }
@@ -603,7 +638,7 @@ public sealed class GameSimulation
         var path = FindGridPath(unit.Cell, destination.Value, blocked);
         if (path.Count < 2)
         {
-            ClearPath(unit);
+            ClearPath(unit, resetVisualState: true);
             unit.TargetCityId = target.Id;
             return;
         }
@@ -640,7 +675,7 @@ public sealed class GameSimulation
         while (open.Count > 0)
         {
             var current = open
-                .OrderBy(point => costSoFar[point] + point.ManhattanDistanceTo(target) * 0.65)
+                .OrderBy(point => costSoFar[point] + point.OctileDistanceTo(target) * 0.65)
                 .ThenBy(point => point.X)
                 .ThenBy(point => point.Y)
                 .First();
@@ -651,7 +686,7 @@ public sealed class GameSimulation
 
             foreach (var next in GetGridNeighbors(current, target, blockedCells))
             {
-                var newCost = costSoFar[current] + _grid.MoveCost(next);
+                var newCost = costSoFar[current] + MoveStepCost(current, next);
                 if (costSoFar.TryGetValue(next, out var oldCost) && newCost >= oldCost)
                     continue;
 
@@ -679,8 +714,9 @@ public sealed class GameSimulation
 
     private IEnumerable<GridPoint> GetGridNeighbors(GridPoint point, GridPoint target, IReadOnlySet<GridPoint> blockedCells)
         => AdjacentCells(point)
-            .Where(next => _grid.IsPassable(next) && (!blockedCells.Contains(next) || next == target))
-            .OrderBy(next => next.ManhattanDistanceTo(target))
+            .Where(next => CanPathEnterCell(point, next, target, blockedCells))
+            .OrderBy(next => MoveStepCost(point, next) + next.OctileDistanceTo(target))
+            .ThenBy(next => IsDiagonalStep(point, next) ? 1 : 0)
             .ThenBy(next => next.X)
             .ThenBy(next => next.Y);
 
@@ -718,7 +754,7 @@ public sealed class GameSimulation
                 unit.PlayerId == attacker.PlayerId &&
                 unit.Id != attacker.Id &&
                 unit.Kind == UnitKind.Commander &&
-                unit.Cell.ManhattanDistanceTo(attacker.Cell) <= 2))
+                unit.Cell.ChebyshevDistanceTo(attacker.Cell) <= 2))
         {
             modifier += 0.15;
         }
@@ -727,7 +763,7 @@ public sealed class GameSimulation
                 unit.PlayerId == attacker.PlayerId &&
                 unit.Id != attacker.Id &&
                 unit.Kind == UnitKind.General &&
-                unit.Cell.ManhattanDistanceTo(attacker.Cell) <= 3))
+                unit.Cell.ChebyshevDistanceTo(attacker.Cell) <= 3))
         {
             modifier += 0.10;
         }
@@ -798,7 +834,7 @@ public sealed class GameSimulation
             return;
         }
 
-        if (_cities.All(city => city.OwnerId == GameConstants.HumanPlayerId))
+        if (HasHumanPlayer && _cities.All(city => city.OwnerId == GameConstants.HumanPlayerId))
         {
             EndWithWinner(GameConstants.HumanPlayerId);
             return;
@@ -832,7 +868,7 @@ public sealed class GameSimulation
 
     private GridPoint? FindAdjacentEmptyCell(GridPoint origin, IReadOnlyDictionary<GridPoint, TacticalUnit> occupied)
     {
-        var candidates = AdjacentCells(origin)
+        var candidates = CardinalAdjacentCells(origin)
             .Where(point => _grid.IsPassable(point) &&
                 !occupied.ContainsKey(point) &&
                 !IsCityCell(point))
@@ -882,6 +918,69 @@ public sealed class GameSimulation
         IReadOnlyDictionary<GridPoint, TacticalUnit> occupied)
         => occupied.TryGetValue(point, out var occupant) && occupant.Id != unitId;
 
+    private bool CanEnterNextCell(
+        TacticalUnit unit,
+        GridPoint nextCell,
+        IReadOnlyDictionary<GridPoint, TacticalUnit> occupied,
+        IReadOnlyDictionary<GridPoint, int> continuingReservations,
+        IReadOnlySet<GridPoint> reservedDestinations)
+    {
+        if (!_grid.IsPassable(nextCell) ||
+            IsReservedByOtherUnit(nextCell, unit.Id, continuingReservations) ||
+            reservedDestinations.Contains(nextCell) ||
+            IsOccupiedByOtherUnit(nextCell, unit.Id, occupied))
+        {
+            return false;
+        }
+
+        if (!IsDiagonalStep(unit.Cell, nextCell))
+            return true;
+
+        return DiagonalSideCells(unit.Cell, nextCell).All(side =>
+            _grid.IsPassable(side) &&
+            !IsReservedByOtherUnit(side, unit.Id, continuingReservations) &&
+            !reservedDestinations.Contains(side) &&
+            !IsOccupiedByOtherUnit(side, unit.Id, occupied));
+    }
+
+    private bool CanPathEnterCell(
+        GridPoint from,
+        GridPoint next,
+        GridPoint target,
+        IReadOnlySet<GridPoint> blockedCells)
+    {
+        if (!_grid.IsPassable(next) || blockedCells.Contains(next) && next != target)
+            return false;
+
+        if (!IsDiagonalStep(from, next))
+            return true;
+
+        return DiagonalSideCells(from, next).All(side =>
+            _grid.IsPassable(side) && !blockedCells.Contains(side));
+    }
+
+    private Dictionary<GridPoint, int> BuildMovingDestinationReservations()
+    {
+        var reservations = new Dictionary<GridPoint, int>();
+        foreach (var unit in _units
+                     .Where(unit => UnitParticipates(unit) && unit.IsMoving && unit.StepProgress > 0)
+                     .OrderBy(unit => unit.PlayerId)
+                     .ThenBy(unit => unit.Id))
+        {
+            var nextCell = unit.Path[unit.PathIndex + 1];
+            if (_grid.IsPassable(nextCell) && !reservations.ContainsKey(nextCell))
+                reservations[nextCell] = unit.Id;
+        }
+
+        return reservations;
+    }
+
+    private static bool IsReservedByOtherUnit(
+        GridPoint point,
+        int unitId,
+        IReadOnlyDictionary<GridPoint, int> reservations)
+        => reservations.TryGetValue(point, out var reservedByUnitId) && reservedByUnitId != unitId;
+
     private bool UnitParticipates(TacticalUnit? unit)
         => unit is { IsAlive: true } &&
             unit.PlayerId >= 0 &&
@@ -890,6 +989,22 @@ public sealed class GameSimulation
 
     private int CountUnits(int playerId)
         => _units.Count(unit => UnitParticipates(unit) && unit.PlayerId == playerId);
+
+    private List<StandingSnapshot> CreateStandings()
+        => _players
+            .OrderBy(player => player.Id)
+            .Select(player => new StandingSnapshot(
+                player.Id,
+                player.Name,
+                player.Kind.ToString(),
+                player.IsEliminated,
+                Math.Round(player.Score, 2),
+                _cities.Count(city => city.OwnerId == player.Id),
+                CountUnits(player.Id),
+                Math.Round(player.Resources, 2),
+                Math.Round(player.GeneralHealth, 1),
+                player.GenomeId))
+            .ToList();
 
     private int CountUnitsOnCity(CityNode city, int playerId)
         => _units.Count(unit => UnitParticipates(unit) && unit.PlayerId == playerId && unit.Cell == city.GridPosition);
@@ -903,23 +1018,34 @@ public sealed class GameSimulation
     private int CountUnitsNearCity(CityNode city, int playerId, int radius)
         => _units.Count(unit => UnitParticipates(unit) &&
             unit.PlayerId == playerId &&
-            unit.Cell.ManhattanDistanceTo(city.GridPosition) <= radius);
+            unit.Cell.ChebyshevDistanceTo(city.GridPosition) <= radius);
 
     private int CountEnemyUnitsNearCity(CityNode city, int playerId, int radius)
         => _units.Count(unit => UnitParticipates(unit) &&
             unit.PlayerId != playerId &&
-            unit.Cell.ManhattanDistanceTo(city.GridPosition) <= radius);
+            unit.Cell.ChebyshevDistanceTo(city.GridPosition) <= radius);
 
     private bool IsCityCell(GridPoint point)
         => _cities.Any(city => city.GridPosition == point);
 
     private static bool AreAdjacent(GridPoint left, GridPoint right)
-        => left.ManhattanDistanceTo(right) == 1;
+        => left != right && left.ChebyshevDistanceTo(right) == 1;
 
     private static GridPoint Offset(GridPoint point, int dx, int dy)
         => new(point.X + dx, point.Y + dy);
 
     private static IEnumerable<GridPoint> AdjacentCells(GridPoint point)
+    {
+        foreach (var cell in CardinalAdjacentCells(point))
+            yield return cell;
+
+        yield return new GridPoint(point.X - 1, point.Y - 1);
+        yield return new GridPoint(point.X + 1, point.Y - 1);
+        yield return new GridPoint(point.X + 1, point.Y + 1);
+        yield return new GridPoint(point.X - 1, point.Y + 1);
+    }
+
+    private static IEnumerable<GridPoint> CardinalAdjacentCells(GridPoint point)
     {
         yield return new GridPoint(point.X, point.Y - 1);
         yield return new GridPoint(point.X + 1, point.Y);
@@ -944,11 +1070,36 @@ public sealed class GameSimulation
         }
     }
 
-    private static void ClearPath(TacticalUnit unit)
+    private void ClearPath(TacticalUnit unit, bool resetVisualState = false)
     {
         unit.Path = [];
         unit.PathIndex = 0;
         unit.StepProgress = 0;
+
+        if (resetVisualState)
+            ResetVisualState(unit);
+    }
+
+    private void ResetVisualState(TacticalUnit unit)
+    {
+        unit.CurrentPosition = _grid.ToMapPoint(unit.Cell);
+        unit.VisualFromCell = unit.Cell;
+        unit.VisualToCell = unit.Cell;
+        unit.VisualFromPosition = unit.CurrentPosition;
+        unit.VisualToPosition = unit.CurrentPosition;
+        unit.VisualMoveTick = -1;
+    }
+
+    private void RecordVisualMovement(TacticalUnit unit, GridPoint fromCell, GridPoint toCell, MapPoint fromPosition)
+    {
+        if (fromPosition.DistanceTo(unit.CurrentPosition) <= 0.0001)
+            return;
+
+        unit.VisualFromCell = fromCell;
+        unit.VisualToCell = toCell;
+        unit.VisualFromPosition = fromPosition;
+        unit.VisualToPosition = unit.CurrentPosition;
+        unit.VisualMoveTick = Tick;
     }
 
     private static MapPoint Interpolate(MapPoint from, MapPoint to, double progress)
@@ -961,6 +1112,18 @@ public sealed class GameSimulation
 
     private static double Normalize(double value, double max)
         => Math.Clamp(value / max, 0, 1);
+
+    private double MoveStepCost(GridPoint from, GridPoint to)
+        => Math.Max(0.1, _grid.MoveCost(to)) * (IsDiagonalStep(from, to) ? DiagonalMoveMultiplier : 1.0);
+
+    private static bool IsDiagonalStep(GridPoint from, GridPoint to)
+        => Math.Abs(from.X - to.X) == 1 && Math.Abs(from.Y - to.Y) == 1;
+
+    private static IEnumerable<GridPoint> DiagonalSideCells(GridPoint from, GridPoint to)
+    {
+        yield return new GridPoint(from.X, to.Y);
+        yield return new GridPoint(to.X, from.Y);
+    }
 }
 
 internal static class EnumerableGridPointExtensions

@@ -46,12 +46,16 @@ public sealed class WairAutomationHandler : IAutomationHandler
             "GetFingerprint" => Ok(new FingerprintResponse(_simulationProvider().CreateFingerprint())),
             "StepTicks" => StepTicks(command),
             "StartMatch" => StartMatch(command),
+            "StartAiOnly" => StartAiOnly(command),
             "RestartMatch" => RestartMatch(),
             "SetDirective" => SetDirective(command),
             "SelectTarget" => SelectTarget(command),
             "SetLightPreference" => SetLightPreference(command),
+            "SetSimulationSpeed" => SetSimulationSpeed(command),
             "TogglePause" => TogglePause(),
             "GetTelemetry" => Ok(_simulationProvider().Telemetry.TakeLast(10).ToList()),
+            "GetStandings" => Ok(_simulationProvider().CreateSnapshot().Standings),
+            "GetUnitVisuals" => Ok(_game.CreateUnitVisualStates()),
             "GetMapState" => Ok(CreateMapState()),
             "GetUiDiagnostics" => Ok(CreateUiDiagnostics()),
             _ => null
@@ -156,7 +160,16 @@ public sealed class WairAutomationHandler : IAutomationHandler
     {
         var seed = GetInt(command, 0, 1337);
         var aiPlayers = GetInt(command, 1, 4);
-        _game.StartMatch(seed, aiPlayers);
+        var mode = GetMode(command, 2, GameMode.HumanVsAi);
+        _game.StartMatch(seed, aiPlayers, mode);
+        return Ok(_simulationProvider().CreateSnapshot());
+    }
+
+    private AutomationResponse StartAiOnly(AutomationCommand command)
+    {
+        var seed = GetInt(command, 0, 1337);
+        var aiPlayers = GetInt(command, 1, 4);
+        _game.StartMatch(seed, aiPlayers, GameMode.AiOnly);
         return Ok(_simulationProvider().CreateSnapshot());
     }
 
@@ -185,6 +198,12 @@ public sealed class WairAutomationHandler : IAutomationHandler
     private AutomationResponse SetLightPreference(AutomationCommand command)
     {
         _game.SetLightPreference(GetDouble(command, 0, 0.65));
+        return Ok(_simulationProvider().CreateSnapshot());
+    }
+
+    private AutomationResponse SetSimulationSpeed(AutomationCommand command)
+    {
+        _game.SetSimulationSpeed(GetInt(command, 0, 1));
         return Ok(_simulationProvider().CreateSnapshot());
     }
 
@@ -234,6 +253,12 @@ public sealed class WairAutomationHandler : IAutomationHandler
         return arg?.ToString() ?? fallback;
     }
 
+    private static GameMode GetMode(AutomationCommand command, int index, GameMode fallback)
+    {
+        var value = GetString(command, index, fallback.ToString());
+        return Enum.TryParse<GameMode>(value, ignoreCase: true, out var mode) ? mode : fallback;
+    }
+
     private static object? GetArg(AutomationCommand command, int index)
         => command.Args != null && command.Args.Length > index ? command.Args[index] : null;
 }
@@ -257,6 +282,25 @@ public sealed record MapStateResponse(
     int CityOccupiedCellCount,
     int DuplicateOccupiedCellCount,
     int ActiveCombatCount);
+
+public sealed record UnitVisualStateResponse(
+    int UnitId,
+    int PlayerId,
+    string Kind,
+    int CellX,
+    int CellY,
+    int VisualFromCellX,
+    int VisualFromCellY,
+    int VisualToCellX,
+    int VisualToCellY,
+    double VisualFromX,
+    double VisualFromY,
+    double VisualToX,
+    double VisualToY,
+    double VisualX,
+    double VisualY,
+    double Progress,
+    bool IsInterpolating);
 
 public sealed record UiDiagnosticsResponse(
     IReadOnlyList<string> VisibleTexts,

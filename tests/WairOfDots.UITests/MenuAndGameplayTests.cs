@@ -18,6 +18,8 @@ public sealed class MenuAndGameplayTests : IAsyncLifetime
         menu.Title.AssertText("Wair of Dots");
         Assert.True(menu.SeedInput.IsVisible());
         Assert.True(menu.AiCountInput.IsVisible());
+        Assert.True(menu.HumanPlayerCheckBox.IsVisible());
+        Assert.True(menu.HumanPlayerCheckBox.IsChecked());
         Assert.True(menu.StartGameButton.IsVisible());
     }
 
@@ -35,6 +37,50 @@ public sealed class MenuAndGameplayTests : IAsyncLifetime
         game.Score.AssertTextContains("Human score");
         Assert.True(game.CityButton(0).IsVisible());
         Assert.True(game.MapCity(0).IsVisible());
+    }
+
+    [Fact]
+    public void StartMenu_HumanUnchecked_StartsAiOnlySpectatorMode()
+    {
+        var menu = new MainMenuPage(_fixture.Context);
+        menu.Start(seed: 2026, aiPlayers: 4, human: false);
+
+        var game = new GamePage(_fixture.Context);
+        game.AssertLoaded(true);
+        var snapshot = GameQueryHelpers.GetSnapshot(_fixture.Context);
+
+        Assert.Equal("AiOnly", snapshot.GameMode);
+        Assert.False(snapshot.HasHumanPlayer);
+        Assert.DoesNotContain(snapshot.Players, player => player.Kind == "Human");
+        Assert.Equal("AI 0", snapshot.Players.Single(player => player.Id == 0).Name);
+        Assert.True(game.SpectatorControlsPanel.IsVisible());
+        Assert.True(game.StandingsPanel.IsVisible());
+        Assert.True(game.SpeedFastButton.IsVisible());
+        Assert.False(game.HumanCommandPanel.IsVisible());
+        Assert.False(game.AttackButton.IsVisible());
+        game.Status.AssertTextContains("AiOnly");
+        game.Score.AssertTextContains("Leader");
+    }
+
+    [Fact]
+    public void AiOnly_GameQueryStartsPlayableMapAndTelemetryForEveryAi()
+    {
+        var snapshot = GameQueryHelpers.StartAiOnly(_fixture.Context, seed: 31, aiPlayers: 4);
+        Assert.Equal("AiOnly", snapshot.GameMode);
+        Assert.False(snapshot.HasHumanPlayer);
+
+        GameQueryHelpers.StepTicks(_fixture.Context, 12);
+        var afterPlanning = GameQueryHelpers.GetSnapshot(_fixture.Context);
+        var map = GameQueryHelpers.GetMapState(_fixture.Context);
+        var standings = GameQueryHelpers.GetStandings(_fixture.Context);
+        var telemetry = GameQueryHelpers.GetTelemetry(_fixture.Context);
+
+        Assert.Equal(4, afterPlanning.Players.Count(player => player.Kind == "Ai"));
+        Assert.Equal(4, afterPlanning.Players.Select(player => player.GenomeId).Distinct().Count());
+        Assert.Equal(4, standings.Count);
+        Assert.Equal(4, telemetry.Select(item => item.PlayerId).Distinct().Count());
+        Assert.True(map.UnitMarkerCount >= 16);
+        Assert.Equal(0, map.DuplicateOccupiedCellCount);
     }
 
     [Fact]
@@ -76,6 +122,73 @@ public sealed class MenuAndGameplayTests : IAsyncLifetime
         Assert.True(map.MovingUnitCount > 0);
         Assert.True(map.MovingUnitGridStepCount > 0);
         Assert.Equal(0, map.DuplicateOccupiedCellCount);
+    }
+
+    [Fact]
+    public void SmoothMovement_ReportsChangingVisualPositionBetweenTicks()
+    {
+        GameQueryHelpers.StartMatch(_fixture.Context, seed: 31, aiPlayers: 4);
+        GameQueryHelpers.StepTicks(_fixture.Context, 12);
+        GameQueryHelpers.StepTicks(_fixture.Context, 1);
+
+        var first = GameQueryHelpers.GetUnitVisuals(_fixture.Context)
+            .First(unit => unit.IsInterpolating);
+
+        var second = first;
+        for (var attempt = 0; attempt < 20 && !VisualPositionChanged(first, second); attempt++)
+        {
+            System.Threading.Thread.Sleep(25);
+            second = GameQueryHelpers.GetUnitVisuals(_fixture.Context)
+                .Single(unit => unit.UnitId == first.UnitId);
+        }
+
+        var map = GameQueryHelpers.GetMapState(_fixture.Context);
+
+        Assert.Equal(0, map.DuplicateOccupiedCellCount);
+        Assert.InRange(first.Progress, 0.0, 1.0);
+        Assert.InRange(second.Progress, 0.0, 1.0);
+        Assert.True(
+            VisualPositionChanged(first, second),
+            $"Unit {first.UnitId} visual position did not change. First=({first.VisualX},{first.VisualY}) p{first.Progress}; Second=({second.VisualX},{second.VisualY}) p{second.Progress}.");
+    }
+
+    [Fact]
+    public void DiagonalMovement_ReportsDiagonalVisualTarget()
+    {
+        GameQueryHelpers.StartMatch(_fixture.Context, seed: 31, aiPlayers: 4);
+        GameQueryHelpers.StepTicks(_fixture.Context, 12);
+
+        var sawDiagonalMove = false;
+        for (var i = 0; i < 30; i++)
+        {
+            GameQueryHelpers.StepTicks(_fixture.Context, 1);
+            var visuals = GameQueryHelpers.GetUnitVisuals(_fixture.Context);
+            if (visuals.Any(IsDiagonalVisualTarget))
+            {
+                sawDiagonalMove = true;
+                break;
+            }
+        }
+
+        var map = GameQueryHelpers.GetMapState(_fixture.Context);
+        Assert.Equal(0, map.DuplicateOccupiedCellCount);
+        Assert.True(sawDiagonalMove);
+    }
+
+    [Fact]
+    public void AiOnly_FastSpeedKeepsSmoothMovementDiagnosticsAndSingleOccupancy()
+    {
+        GameQueryHelpers.StartAiOnly(_fixture.Context, seed: 31, aiPlayers: 4);
+        GameQueryHelpers.SetSimulationSpeed(_fixture.Context, 4);
+        GameQueryHelpers.StepTicks(_fixture.Context, 12);
+        GameQueryHelpers.StepTicks(_fixture.Context, 1);
+
+        var visuals = GameQueryHelpers.GetUnitVisuals(_fixture.Context);
+        var map = GameQueryHelpers.GetMapState(_fixture.Context);
+
+        Assert.Equal(0, map.DuplicateOccupiedCellCount);
+        Assert.Contains(visuals, unit => unit.IsInterpolating);
+        Assert.All(visuals, unit => Assert.InRange(unit.Progress, 0.0, 1.0));
     }
 
     [Fact]
@@ -159,4 +272,13 @@ public sealed class MenuAndGameplayTests : IAsyncLifetime
         Assert.Equal("Running", snapshot.Phase);
         game.Status.AssertTextContains("Seed 88");
     }
+
+    private static bool VisualPositionChanged(UnitVisualStateDto first, UnitVisualStateDto second)
+        => Math.Abs(first.VisualX - second.VisualX) > 0.0001 ||
+            Math.Abs(first.VisualY - second.VisualY) > 0.0001;
+
+    private static bool IsDiagonalVisualTarget(UnitVisualStateDto unit)
+        => unit.IsInterpolating &&
+            Math.Abs(unit.VisualFromCellX - unit.VisualToCellX) == 1 &&
+            Math.Abs(unit.VisualFromCellY - unit.VisualToCellY) == 1;
 }

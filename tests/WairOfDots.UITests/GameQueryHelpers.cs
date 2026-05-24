@@ -9,6 +9,9 @@ public static class GameQueryHelpers
     public static MatchSnapshot StartMatch(IStrideTestContext context, int seed = 1337, int aiPlayers = 4)
         => Send<MatchSnapshot>(context, "StartMatch", seed, aiPlayers);
 
+    public static MatchSnapshot StartAiOnly(IStrideTestContext context, int seed = 1337, int aiPlayers = 4)
+        => Send<MatchSnapshot>(context, "StartAiOnly", seed, aiPlayers);
+
     public static MatchSnapshot GetSnapshot(IStrideTestContext context)
         => Send<MatchSnapshot>(context, "GetSnapshot");
 
@@ -27,11 +30,23 @@ public static class GameQueryHelpers
     public static MatchSnapshot TogglePause(IStrideTestContext context)
         => Send<MatchSnapshot>(context, "TogglePause");
 
+    public static MatchSnapshot SetSimulationSpeed(IStrideTestContext context, int speed)
+        => Send<MatchSnapshot>(context, "SetSimulationSpeed", speed);
+
     public static MapStateDto GetMapState(IStrideTestContext context)
         => Send<MapStateDto>(context, "GetMapState");
 
     public static UiDiagnosticsDto GetUiDiagnostics(IStrideTestContext context)
         => Send<UiDiagnosticsDto>(context, "GetUiDiagnostics");
+
+    public static IReadOnlyList<StandingDto> GetStandings(IStrideTestContext context)
+        => Send<IReadOnlyList<StandingDto>>(context, "GetStandings");
+
+    public static IReadOnlyList<TelemetryDto> GetTelemetry(IStrideTestContext context)
+        => Send<IReadOnlyList<TelemetryDto>>(context, "GetTelemetry");
+
+    public static IReadOnlyList<UnitVisualStateDto> GetUnitVisuals(IStrideTestContext context)
+        => Send<IReadOnlyList<UnitVisualStateDto>>(context, "GetUnitVisuals");
 
     private static T Send<T>(IStrideTestContext context, string method, params object[] args)
     {
@@ -46,6 +61,45 @@ public static class GameQueryHelpers
 }
 
 public sealed record FingerprintDto(string Fingerprint);
+
+public sealed record StandingDto(
+    int PlayerId,
+    string Name,
+    string Kind,
+    bool IsEliminated,
+    double Score,
+    int CityCount,
+    int UnitCount,
+    double Resources,
+    double GeneralHealth,
+    string GenomeId);
+
+public sealed record TelemetryDto(
+    int Tick,
+    int PlayerId,
+    string GenomeId,
+    string Observation,
+    string Action,
+    double FitnessDelta);
+
+public sealed record UnitVisualStateDto(
+    int UnitId,
+    int PlayerId,
+    string Kind,
+    int CellX,
+    int CellY,
+    int VisualFromCellX,
+    int VisualFromCellY,
+    int VisualToCellX,
+    int VisualToCellY,
+    double VisualFromX,
+    double VisualFromY,
+    double VisualToX,
+    double VisualToY,
+    double VisualX,
+    double VisualY,
+    double Progress,
+    bool IsInterpolating);
 
 public sealed record MapStateDto(
     int TerrainPatchCount,
