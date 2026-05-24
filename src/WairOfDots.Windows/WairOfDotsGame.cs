@@ -282,8 +282,8 @@ public sealed class WairOfDotsGame : Game
         commandPanel.Children.Add(commandRow);
 
         var prefRow = new StackPanel { Orientation = Orientation.Horizontal };
-        prefRow.Children.Add(Button("LightPreferenceButton", "More Light", () => SetLightPreference(0.8)));
-        prefRow.Children.Add(Button("HeavyPreferenceButton", "More Heavy", () => SetLightPreference(0.35)));
+        prefRow.Children.Add(Button("LightPreferenceButton", "More Infantry", () => SetLightPreference(0.8)));
+        prefRow.Children.Add(Button("HeavyPreferenceButton", "More Tanks", () => SetLightPreference(0.35)));
         commandPanel.Children.Add(prefRow);
 
         var systemRow = new StackPanel { Orientation = Orientation.Horizontal };
@@ -365,7 +365,7 @@ public sealed class WairOfDotsGame : Game
 
         var target = snapshot.Cities.FirstOrDefault(c => c.Id == snapshot.HumanTargetCityId);
         if (_targetText != null)
-            _targetText.Text = $"Directive {snapshot.HumanDirective} | Target {target?.Name ?? "None"} | Light {snapshot.HumanLightPreference:P0}";
+            _targetText.Text = $"Directive {snapshot.HumanDirective} | Target {target?.Name ?? "None"} | Infantry {snapshot.HumanLightPreference:P0}";
 
         if (_lastEventText != null)
             _lastEventText.Text = snapshot.LastEvent;
@@ -418,7 +418,6 @@ public sealed class WairOfDotsGame : Game
         AddMapLegend();
         AddCityMarkers(snapshot);
         AddUnitMarkers(snapshot);
-        AddLeaderMarkers();
     }
 
     private void AddTerrainPatches()
@@ -481,9 +480,11 @@ public sealed class WairOfDotsGame : Game
                 Name = $"MapCity_{city.Id}",
                 Content = new TextBlock
                 {
-                    Text = "●",
+                    Text = "◆",
                     Font = _font,
-                    TextSize = citySnapshot.OwnerId == GameConstants.NeutralPlayerId ? 26 : 30,
+                    TextSize = citySnapshot.TotalUnits > 0
+                        ? 34
+                        : citySnapshot.OwnerId == GameConstants.NeutralPlayerId ? 26 : 30,
                     TextColor = PlayerColor(citySnapshot.OwnerId)
                 },
                 Padding = new Thickness(0, 0, 0, 0)
@@ -503,32 +504,28 @@ public sealed class WairOfDotsGame : Game
 
     private void AddUnitMarkers(MatchSnapshot snapshot)
     {
-        var markerIndex = 0;
-        foreach (var city in _simulation.Cities)
+        foreach (var unit in _simulation.Units.Where(unit => unit.IsAlive).OrderBy(unit => unit.Id))
         {
-            foreach (var pair in city.Garrisons.Where(pair => pair.Key >= 0 && pair.Value.TotalUnits > 0))
+            var (name, glyph, size) = unit.Kind switch
             {
-                var offset = MarkerOffset(markerIndex++);
-                AddCircleMarker($"UnitMarker_{city.Id}_{pair.Key}", "●", city.Position, offset.X, offset.Y, 14, PlayerColor(pair.Key));
-            }
-        }
+                UnitKind.Commander => ($"CommanderMarker_{unit.PlayerId}", "○", 20f),
+                UnitKind.General => ($"GeneralMarker_{unit.PlayerId}", "◉", 19f),
+                UnitKind.Tank => ($"UnitMarker_{unit.Id}", "●", 17f),
+                _ => ($"UnitMarker_{unit.Id}", "●", 14f)
+            };
 
-        foreach (var group in _simulation.MovingGroups)
-        {
-            AddCircleMarker($"MovingUnitMarker_{group.Id}", "●", group.CurrentPosition, 0, -0.035f, 13, PlayerColor(group.PlayerId));
+            if (IsEngaged(unit))
+                AddCircleMarker($"EngagedMarker_{unit.Id}", "○", unit.CurrentPosition, 0, -0.018f, size + 7, Color.LightYellow);
+
+            AddCircleMarker(name, glyph, unit.CurrentPosition, 0, -0.018f, size, PlayerColor(unit.PlayerId));
         }
     }
 
-    private void AddLeaderMarkers()
-    {
-        foreach (var player in _simulation.Players.Where(player => !player.IsEliminated))
-        {
-            var commanderCity = _simulation.Cities[player.CommanderCityId];
-            var generalCity = _simulation.Cities[player.GeneralCityId];
-            AddCircleMarker($"CommanderMarker_{player.Id}", "○", commanderCity.Position, -0.027f, -0.027f, 20, PlayerColor(player.Id));
-            AddCircleMarker($"GeneralMarker_{player.Id}", "◉", generalCity.Position, 0.027f, -0.027f, 19, PlayerColor(player.Id));
-        }
-    }
+    private bool IsEngaged(TacticalUnit unit)
+        => _simulation.Units.Any(other =>
+            other.IsAlive &&
+            other.PlayerId != unit.PlayerId &&
+            other.Cell.ManhattanDistanceTo(unit.Cell) == 1);
 
     private void AddCircleMarker(string name, string glyph, MapPoint point, float offsetX, float offsetY, float size, Color color)
     {

@@ -26,8 +26,10 @@ public enum PlayerDirective
 
 public enum UnitKind
 {
-    Light,
-    Heavy
+    Infantry,
+    Tank,
+    Commander,
+    General
 }
 
 public enum TerrainKind
@@ -137,26 +139,6 @@ public sealed class GridMap
     }
 }
 
-public sealed class Garrison
-{
-    public int Light { get; set; }
-    public int Heavy { get; set; }
-    public double Morale { get; set; } = 1.0;
-    public double AttritionDebt { get; set; }
-
-    public int TotalUnits => Light + Heavy;
-    public double Power => (Light + Heavy * 2.25) * Math.Clamp(Morale, 0.1, 1.25);
-
-    public Garrison Clone()
-        => new()
-        {
-            Light = Light,
-            Heavy = Heavy,
-            Morale = Morale,
-            AttritionDebt = AttritionDebt
-        };
-}
-
 public sealed class CityNode
 {
     public CityNode(int id, string name, MapPoint position, int production = 1, int capacity = 5)
@@ -176,26 +158,6 @@ public sealed class CityNode
     public GridPoint GridPosition { get; set; }
     public int OwnerId { get; set; } = GameConstants.NeutralPlayerId;
     public List<int> Neighbors { get; } = [];
-    public Dictionary<int, Garrison> Garrisons { get; } = [];
-
-    public int TotalUnitsFor(int playerId)
-        => Garrisons.TryGetValue(playerId, out var garrison) ? garrison.TotalUnits : 0;
-
-    public int TotalEnemyUnitsFor(int playerId)
-        => Garrisons
-            .Where(pair => pair.Key != playerId && pair.Key >= 0)
-            .Sum(pair => pair.Value.TotalUnits);
-
-    public Garrison GetOrCreateGarrison(int playerId)
-    {
-        if (!Garrisons.TryGetValue(playerId, out var garrison))
-        {
-            garrison = new Garrison();
-            Garrisons[playerId] = garrison;
-        }
-
-        return garrison;
-    }
 }
 
 public sealed class PlayerState
@@ -218,37 +180,67 @@ public sealed class PlayerState
     public int HomeCityId { get; }
     public int CommanderCityId { get; set; }
     public int GeneralCityId { get; set; }
+    public int? CommanderUnitId { get; set; }
+    public int? GeneralUnitId { get; set; }
     public string GenomeId { get; }
     public bool IsEliminated { get; set; }
     public double Resources { get; set; } = 4;
-    public double CommanderHealth { get; set; } = 100;
-    public double GeneralHealth { get; set; } = 200;
+    public double CommanderHealth { get; set; } = TacticalUnit.DefaultHealth(UnitKind.Commander);
+    public double GeneralHealth { get; set; } = TacticalUnit.DefaultHealth(UnitKind.General);
     public PlayerDirective Directive { get; set; } = PlayerDirective.Attack;
     public int TargetCityId { get; set; }
     public double LightPreference { get; set; } = 0.65;
     public double Score { get; set; }
 }
 
-public sealed class MovingGroup
+public sealed class TacticalUnit
 {
     public int Id { get; init; }
     public int PlayerId { get; init; }
-    public int FromCityId { get; init; }
-    public int ToCityId { get; init; }
-    public int TargetCityId { get; init; }
-    public GridPoint CurrentCell { get; set; }
-    public IReadOnlyList<GridPoint> Path { get; init; } = [];
+    public UnitKind Kind { get; init; }
+    public GridPoint Cell { get; set; }
+    public IReadOnlyList<GridPoint> Path { get; set; } = [];
     public int PathIndex { get; set; }
     public double StepProgress { get; set; }
     public MapPoint CurrentPosition { get; set; }
-    public int Light { get; set; }
-    public int Heavy { get; set; }
+    public double Health { get; set; }
     public double Morale { get; set; } = 1.0;
-    public double DistanceRemaining { get; set; }
-    public double OriginalDistance { get; init; }
-    public int TotalUnits => Light + Heavy;
+    public int? TargetCityId { get; set; }
+
+    public bool IsAlive => Health > 0;
+    public bool IsLeader => Kind is UnitKind.Commander or UnitKind.General;
     public int RemainingGridSteps => Math.Max(0, Path.Count - PathIndex - 1);
-    public double Speed => TotalUnits == 0 ? 0 : ((Light * 1.2) + (Heavy * 0.7)) / TotalUnits;
+    public bool IsMoving => Path.Count > 1 && PathIndex < Path.Count - 1;
+
+    public double Speed
+        => Kind switch
+        {
+            UnitKind.Infantry => 1.15,
+            UnitKind.Tank => 0.82,
+            UnitKind.Commander => 1.0,
+            UnitKind.General => 0.72,
+            _ => 1.0
+        };
+
+    public double AttackPower
+        => Kind switch
+        {
+            UnitKind.Infantry => 2.0,
+            UnitKind.Tank => 3.7,
+            UnitKind.Commander => 1.8,
+            UnitKind.General => 1.4,
+            _ => 1.0
+        };
+
+    public static double DefaultHealth(UnitKind kind)
+        => kind switch
+        {
+            UnitKind.Infantry => 10,
+            UnitKind.Tank => 18,
+            UnitKind.Commander => 24,
+            UnitKind.General => 32,
+            _ => 10
+        };
 }
 
 public sealed record HumanCommand(
@@ -294,6 +286,17 @@ public sealed record PlayerSnapshot(
     double Score,
     string GenomeId);
 
+public sealed record UnitSnapshot(
+    int Id,
+    int PlayerId,
+    string Kind,
+    int X,
+    int Y,
+    double Health,
+    bool IsLeader,
+    int? TargetCityId,
+    int RemainingGridSteps);
+
 public sealed record MatchSnapshot(
     int Tick,
     string Phase,
@@ -302,11 +305,12 @@ public sealed record MatchSnapshot(
     int HumanTargetCityId,
     string HumanDirective,
     double HumanLightPreference,
-    int MovingGroupCount,
+    int MovingUnitCount,
     string LastEvent,
     string Fingerprint,
     IReadOnlyList<PlayerSnapshot> Players,
-    IReadOnlyList<CitySnapshot> Cities);
+    IReadOnlyList<CitySnapshot> Cities,
+    IReadOnlyList<UnitSnapshot> Units);
 
 public static class GameConstants
 {

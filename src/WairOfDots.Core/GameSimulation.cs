@@ -7,17 +7,18 @@ public sealed class GameSimulation
 {
     private const int ProductionInterval = 6;
     private const int PlanningInterval = 12;
-    private const double LightCost = 2.0;
-    private const double HeavyCost = 4.0;
+    private const double InfantryCost = 2.0;
+    private const double TankCost = 4.0;
 
     private readonly List<CityNode> _cities;
     private readonly IReadOnlyList<TerrainPatch> _terrain;
     private readonly GridMap _grid;
     private readonly List<PlayerState> _players;
-    private readonly List<MovingGroup> _movingGroups = [];
+    private readonly List<TacticalUnit> _units = [];
     private readonly List<TelemetryEvent> _telemetry = [];
     private readonly Dictionary<int, IAiController> _aiControllers = [];
-    private int _nextGroupId = 1;
+    private int _nextUnitId = 1;
+    private int _activeCombatCount;
     private string _lastEvent = "Waiting";
 
     private GameSimulation(GameSettings settings, CreatedMap map)
@@ -32,13 +33,15 @@ public sealed class GameSimulation
         {
             var home = _cities[player.HomeCityId];
             home.OwnerId = player.Id;
-            home.GetOrCreateGarrison(player.Id).Light = 4;
-            home.GetOrCreateGarrison(player.Id).Heavy = 1;
             player.TargetCityId = 0;
+            PlaceInitialArmy(player, home);
 
             if (player.Kind == PlayerKind.Ai)
                 _aiControllers[player.Id] = GenomeNeatController.Create(Settings.Seed, player.Id);
         }
+
+        UpdateLeaderHealth();
+        UpdateScores();
     }
 
     public GameSettings Settings { get; }
@@ -49,9 +52,14 @@ public sealed class GameSimulation
     public IReadOnlyList<TerrainPatch> Terrain => _terrain;
     public GridMap Grid => _grid;
     public IReadOnlyList<PlayerState> Players => _players;
-    public IReadOnlyList<MovingGroup> MovingGroups => _movingGroups;
+    public IReadOnlyList<TacticalUnit> Units => _units;
     public IReadOnlyList<TelemetryEvent> Telemetry => _telemetry;
     public string LastEvent => _lastEvent;
+    public int ActiveCombatCount => _activeCombatCount;
+    public int MovingUnitCount => _units.Count(unit => UnitParticipates(unit) && unit.IsMoving);
+    public int MovingUnitGridStepCount => _units
+        .Where(unit => UnitParticipates(unit) && unit.IsMoving)
+        .Sum(unit => unit.RemainingGridSteps);
 
     public static GameSimulation Create(GameSettings settings)
     {
@@ -115,6 +123,8 @@ public sealed class GameSimulation
 
     public MatchSnapshot CreateSnapshot()
     {
+        UpdateLeaderHealth();
+
         var playerSnapshots = _players
             .Select(player => new PlayerSnapshot(
                 player.Id,
@@ -135,10 +145,25 @@ public sealed class GameSimulation
                 city.Id,
                 city.Name,
                 city.OwnerId,
-                city.TotalUnitsFor(GameConstants.HumanPlayerId),
-                city.TotalEnemyUnitsFor(GameConstants.HumanPlayerId),
-                city.Garrisons.Values.Sum(g => g.TotalUnits),
+                CountUnitsOnCity(city, GameConstants.HumanPlayerId),
+                CountEnemyUnitsOnCity(city, GameConstants.HumanPlayerId),
+                CountAllUnitsOnCity(city),
                 city.Neighbors.ToArray()))
+            .ToList();
+
+        var unitSnapshots = _units
+            .Where(UnitParticipates)
+            .OrderBy(unit => unit.Id)
+            .Select(unit => new UnitSnapshot(
+                unit.Id,
+                unit.PlayerId,
+                unit.Kind.ToString(),
+                unit.Cell.X,
+                unit.Cell.Y,
+                Math.Round(unit.Health, 2),
+                unit.IsLeader,
+                unit.TargetCityId,
+                unit.RemainingGridSteps))
             .ToList();
 
         return new MatchSnapshot(
@@ -149,11 +174,12 @@ public sealed class GameSimulation
             Human.TargetCityId,
             Human.Directive.ToString(),
             Math.Round(Human.LightPreference, 2),
-            _movingGroups.Count,
+            MovingUnitCount,
             _lastEvent,
             CreateFingerprint(),
             playerSnapshots,
-            citySnapshots);
+            citySnapshots,
+            unitSnapshots);
     }
 
     public string CreateFingerprint()
@@ -167,17 +193,13 @@ public sealed class GameSimulation
         }
 
         foreach (var city in _cities.OrderBy(c => c.Id))
-        {
-            builder.Append(CultureInfo.InvariantCulture, $"c{city.Id}:{city.OwnerId}:");
-            foreach (var pair in city.Garrisons.OrderBy(p => p.Key))
-                builder.Append(CultureInfo.InvariantCulture, $"{pair.Key}/{pair.Value.Light}/{pair.Value.Heavy}/{pair.Value.Morale:F2},");
-            builder.Append(';');
-        }
+            builder.Append(CultureInfo.InvariantCulture, $"c{city.Id}:{city.OwnerId};");
 
-        foreach (var group in _movingGroups.OrderBy(g => g.Id))
+        foreach (var unit in _units.Where(unit => unit.IsAlive).OrderBy(unit => unit.Id))
         {
+            var next = unit.IsMoving ? unit.Path[unit.PathIndex + 1] : unit.Cell;
             builder.Append(CultureInfo.InvariantCulture,
-                $"m{group.Id}:{group.PlayerId}:{group.FromCityId}>{group.TargetCityId}:{group.CurrentCell.X},{group.CurrentCell.Y}:{group.PathIndex}:{group.StepProgress:F2}:{group.Light}/{group.Heavy}:{group.DistanceRemaining:F2};");
+                $"u{unit.Id}:{unit.PlayerId}:{unit.Kind}:{unit.Cell.X},{unit.Cell.Y}:{next.X},{next.Y}:{unit.TargetCityId}:{unit.PathIndex}:{unit.StepProgress:F2}:{unit.Health:F1}:{unit.Morale:F2};");
         }
 
         return Fingerprint.Create(builder.ToString());
@@ -193,18 +215,62 @@ public sealed class GameSimulation
             yield return new PlayerState(i, $"AI {i}", PlayerKind.Ai, homeCityIds[i], GenomeNeatController.Create(settings.Seed, i).GenomeId);
     }
 
+    private void PlaceInitialArmy(PlayerState player, CityNode home)
+    {
+        var homeCell = home.GridPosition;
+        var general = CreateUnit(player.Id, UnitKind.General, homeCell);
+        player.GeneralUnitId = general.Id;
+        player.GeneralCityId = home.Id;
+
+        var commander = CreateUnitNear(player.Id, UnitKind.Commander, Offset(homeCell, 0, -1));
+        player.CommanderUnitId = commander.Id;
+        player.CommanderCityId = home.Id;
+
+        CreateUnitNear(player.Id, UnitKind.Infantry, Offset(homeCell, 1, 0));
+        CreateUnitNear(player.Id, UnitKind.Infantry, Offset(homeCell, 0, 2));
+        CreateUnitNear(player.Id, UnitKind.Tank, Offset(homeCell, -2, 0));
+    }
+
+    private TacticalUnit CreateUnitNear(int playerId, UnitKind kind, GridPoint preferredCell)
+    {
+        var cell = FindNearestEmptyPassableCell(preferredCell, includePreferred: true, allowCityCells: false)
+            ?? throw new InvalidOperationException($"No empty passable cell is available for {kind}.");
+
+        return CreateUnit(playerId, kind, cell);
+    }
+
+    private TacticalUnit CreateUnit(int playerId, UnitKind kind, GridPoint cell)
+    {
+        var unit = new TacticalUnit
+        {
+            Id = _nextUnitId++,
+            PlayerId = playerId,
+            Kind = kind,
+            Cell = cell,
+            CurrentPosition = _grid.ToMapPoint(cell),
+            Health = TacticalUnit.DefaultHealth(kind)
+        };
+
+        _units.Add(unit);
+        return unit;
+    }
+
     private void StepOne()
     {
         if (Phase != MatchPhase.Running)
             return;
 
         Tick++;
+        _activeCombatCount = 0;
 
         if (Tick % ProductionInterval == 0)
             Produce();
 
-        MoveGroups();
-        ResolveCities();
+        ResolveAdjacentCombats();
+        MoveUnits();
+        ResolveAdjacentCombats();
+        ResolveCityCapture();
+        UpdateLeaderHealth();
 
         if (Tick % PlanningInterval == 0)
             PlanAndDispatch();
@@ -215,6 +281,7 @@ public sealed class GameSimulation
 
     private void Produce()
     {
+        var occupied = BuildOccupiedCells();
         foreach (var player in _players.Where(p => !p.IsEliminated))
         {
             var ownedCities = _cities.Where(c => c.OwnerId == player.Id).ToList();
@@ -222,186 +289,161 @@ public sealed class GameSimulation
 
             foreach (var city in ownedCities)
             {
-                var garrison = city.GetOrCreateGarrison(player.Id);
-                if (garrison.TotalUnits >= city.Capacity || HasEnemyPresence(city, player.Id))
+                var outputCell = FindAdjacentEmptyCell(city.GridPosition, occupied);
+                if (!outputCell.HasValue)
                     continue;
 
-                var shouldBuildLight = player.Resources < HeavyCost ||
+                var buildInfantry = player.Resources < TankCost ||
                     ((Tick + city.Id + player.Id) % 100) / 100.0 < player.LightPreference;
+                var kind = buildInfantry ? UnitKind.Infantry : UnitKind.Tank;
+                var cost = kind == UnitKind.Infantry ? InfantryCost : TankCost;
 
-                if (shouldBuildLight && player.Resources >= LightCost)
+                if (player.Resources < cost && kind == UnitKind.Tank)
                 {
-                    garrison.Light++;
-                    player.Resources -= LightCost;
+                    kind = UnitKind.Infantry;
+                    cost = InfantryCost;
                 }
-                else if (player.Resources >= HeavyCost)
-                {
-                    garrison.Heavy++;
-                    player.Resources -= HeavyCost;
-                }
+
+                if (player.Resources < cost)
+                    continue;
+
+                var unit = CreateUnit(player.Id, kind, outputCell.Value);
+                occupied[unit.Cell] = unit;
+                player.Resources -= cost;
+                _lastEvent = $"{player.Name} trained {kind} near {city.Name}";
             }
         }
     }
 
-    private void MoveGroups()
+    private void MoveUnits()
     {
-        for (var i = _movingGroups.Count - 1; i >= 0; i--)
+        var occupied = BuildOccupiedCells();
+        var reservedDestinations = new HashSet<GridPoint>();
+        foreach (var unit in _units
+                     .Where(UnitParticipates)
+                     .OrderBy(unit => unit.PlayerId)
+                     .ThenBy(unit => unit.Id))
         {
-            var group = _movingGroups[i];
-            if (group.Path.Count < 2 || group.PathIndex >= group.Path.Count - 1)
+            if (FindAdjacentEnemy(unit, occupied) != null)
+                continue;
+
+            if (unit.TargetCityId.HasValue)
+                EnsureUnitPath(unit);
+
+            if (!unit.IsMoving)
+                continue;
+
+            var nextCell = unit.Path[unit.PathIndex + 1];
+            if (!_grid.IsPassable(nextCell) ||
+                reservedDestinations.Contains(nextCell) ||
+                IsOccupiedByOtherUnit(nextCell, unit.Id, occupied))
             {
-                ArriveGroup(i, group);
+                ClearPath(unit);
                 continue;
             }
 
-            var movement = Math.Max(0.05, group.Speed);
-            while (movement > 0 && group.PathIndex < group.Path.Count - 1)
+            var moveCost = Math.Max(0.1, _grid.MoveCost(nextCell));
+            unit.StepProgress += unit.Speed / moveCost;
+            if (unit.StepProgress >= 1.0)
             {
-                var nextCell = group.Path[group.PathIndex + 1];
-                var moveCost = Math.Max(0.1, _grid.MoveCost(nextCell));
-                var remainingStepCost = (1.0 - group.StepProgress) * moveCost;
+                occupied.Remove(unit.Cell);
+                unit.Cell = nextCell;
+                unit.PathIndex++;
+                unit.StepProgress = 0;
+                unit.CurrentPosition = _grid.ToMapPoint(unit.Cell);
+                occupied[unit.Cell] = unit;
+                reservedDestinations.Add(unit.Cell);
 
-                if (movement + 0.00001 >= remainingStepCost)
-                {
-                    movement -= remainingStepCost;
-                    group.PathIndex++;
-                    group.CurrentCell = nextCell;
-                    group.StepProgress = 0;
-                    group.CurrentPosition = _grid.ToMapPoint(nextCell);
-                    continue;
-                }
-
-                group.StepProgress += movement / moveCost;
-                movement = 0;
-                group.CurrentPosition = Interpolate(
-                    _grid.ToMapPoint(group.CurrentCell),
-                    _grid.ToMapPoint(nextCell),
-                    group.StepProgress);
+                if (!unit.IsMoving)
+                    ClearPath(unit);
             }
-
-            group.DistanceRemaining = group.RemainingGridSteps +
-                (group.PathIndex < group.Path.Count - 1 ? 1.0 - group.StepProgress : 0);
-
-            if (group.PathIndex >= group.Path.Count - 1 ||
-                group.CurrentCell == _cities[group.TargetCityId].GridPosition)
+            else
             {
-                ArriveGroup(i, group);
+                unit.CurrentPosition = Interpolate(
+                    _grid.ToMapPoint(unit.Cell),
+                    _grid.ToMapPoint(nextCell),
+                    unit.StepProgress);
             }
         }
     }
 
-    private void ArriveGroup(int index, MovingGroup group)
+    private void ResolveAdjacentCombats()
     {
-        var city = _cities[group.TargetCityId];
-        var garrison = city.GetOrCreateGarrison(group.PlayerId);
-        garrison.Light += group.Light;
-        garrison.Heavy += group.Heavy;
-        garrison.Morale = Math.Clamp((garrison.Morale + group.Morale) / 2.0, 0.1, 1.25);
-        _movingGroups.RemoveAt(index);
-        _lastEvent = $"{_players[group.PlayerId].Name} reached {city.Name}";
+        var occupied = BuildOccupiedCells();
+        var attacks = new List<(TacticalUnit Attacker, TacticalUnit Defender, double Damage)>();
+        foreach (var attacker in _units
+                     .Where(UnitParticipates)
+                     .OrderBy(unit => unit.PlayerId)
+                     .ThenBy(unit => unit.Id))
+        {
+            var defender = FindAdjacentEnemy(attacker, occupied);
+            if (defender == null)
+                continue;
+
+            attacks.Add((attacker, defender, CalculateAttackDamage(attacker, defender)));
+        }
+
+        _activeCombatCount += attacks.Count;
+        foreach (var (attacker, defender, damage) in attacks)
+        {
+            if (!UnitParticipates(attacker) || !UnitParticipates(defender) || !AreAdjacent(attacker.Cell, defender.Cell))
+                continue;
+
+            defender.Health -= damage;
+            defender.Morale = Math.Max(0.25, defender.Morale - 0.02);
+            attacker.Morale = Math.Min(1.25, attacker.Morale + 0.005);
+            _lastEvent = $"{_players[attacker.PlayerId].Name} attacked {_players[defender.PlayerId].Name}'s {defender.Kind}";
+        }
+
+        RemoveDefeatedUnits();
     }
 
-    private void ResolveCities()
+    private void RemoveDefeatedUnits()
     {
+        var defeated = _units.Where(unit => unit.Health <= 0).ToList();
+        foreach (var unit in defeated)
+        {
+            if (unit.PlayerId < 0 || unit.PlayerId >= _players.Count)
+                continue;
+
+            var player = _players[unit.PlayerId];
+            if (unit.Kind == UnitKind.Commander)
+            {
+                player.CommanderHealth = 0;
+                player.CommanderUnitId = null;
+                _lastEvent = $"{player.Name} lost a commander";
+            }
+            else if (unit.Kind == UnitKind.General)
+            {
+                player.GeneralHealth = 0;
+                player.GeneralUnitId = null;
+                player.IsEliminated = true;
+                _lastEvent = $"{player.Name} lost a general";
+            }
+        }
+
+        _units.RemoveAll(unit => unit.Health <= 0 ||
+            unit.PlayerId >= 0 && unit.PlayerId < _players.Count && _players[unit.PlayerId].IsEliminated);
+    }
+
+    private void ResolveCityCapture()
+    {
+        var occupied = BuildOccupiedCells();
         foreach (var city in _cities)
         {
-            ApplyCapacityPressure(city);
-
-            var active = city.Garrisons
-                .Where(pair => pair.Key >= 0 && !IsEliminated(pair.Key) && pair.Value.TotalUnits > 0)
-                .ToList();
-
-            if (active.Count == 0)
+            if (!occupied.TryGetValue(city.GridPosition, out var occupant) || !UnitParticipates(occupant))
                 continue;
 
-            if (active.Count == 1)
-            {
-                var newOwner = active[0].Key;
-                if (city.OwnerId != newOwner)
-                    CaptureCity(city, newOwner);
-                continue;
-            }
-
-            ResolveCombat(city, active);
+            if (city.OwnerId != occupant.PlayerId)
+                CaptureCity(city, occupant);
         }
     }
 
-    private void ApplyCapacityPressure(CityNode city)
+    private void CaptureCity(CityNode city, TacticalUnit occupant)
     {
-        foreach (var garrison in city.Garrisons.Values.Where(g => g.TotalUnits > city.Capacity))
-        {
-            garrison.Morale = Math.Max(0.1, garrison.Morale - 0.02);
-            if (Tick % 4 == 0)
-                RemoveWeakestUnit(garrison);
-        }
-    }
-
-    private void ResolveCombat(CityNode city, List<KeyValuePair<int, Garrison>> active)
-    {
-        var totalPower = active.Sum(pair => pair.Value.Power);
-        if (totalPower <= 0)
-            return;
-
-        foreach (var (playerId, garrison) in active)
-        {
-            var enemyPower = totalPower - garrison.Power;
-            garrison.AttritionDebt += enemyPower * 0.075;
-            garrison.Morale = Math.Max(0.05, garrison.Morale - enemyPower * 0.0025);
-
-            while (garrison.AttritionDebt >= 1.0 && garrison.TotalUnits > 0)
-            {
-                RemoveWeakestUnit(garrison);
-                garrison.AttritionDebt -= 1.0;
-                _lastEvent = $"Combat at {city.Name}";
-            }
-
-            if (garrison.TotalUnits <= 0)
-                city.Garrisons.Remove(playerId);
-        }
-    }
-
-    private void CaptureCity(CityNode city, int newOwner)
-    {
-        var oldOwner = city.OwnerId;
-        city.OwnerId = newOwner;
-        var garrison = city.GetOrCreateGarrison(newOwner);
-        garrison.Morale = Math.Min(1.25, garrison.Morale + 0.12);
-        _lastEvent = $"{_players[newOwner].Name} captured {city.Name}";
-
-        if (oldOwner >= 0 && oldOwner != newOwner)
-            DamageLeaderAt(city.Id, oldOwner, newOwner);
-
-        foreach (var player in _players.Where(p => p.Id != newOwner && !p.IsEliminated))
-            DamageLeaderAt(city.Id, player.Id, newOwner);
-    }
-
-    private void DamageLeaderAt(int cityId, int defenderId, int attackerId)
-    {
-        var defender = _players[defenderId];
-        if (defender.CommanderCityId == cityId && defender.CommanderHealth > 0)
-        {
-            defender.CommanderHealth = 0;
-            PenalizeMorale(defenderId, 0.35);
-            _lastEvent = $"{_players[attackerId].Name} broke {defender.Name}'s commander";
-        }
-
-        if (defender.GeneralCityId == cityId && defender.GeneralHealth > 0)
-        {
-            defender.GeneralHealth = 0;
-            defender.IsEliminated = true;
-            PenalizeMorale(defenderId, 0.8);
-            _lastEvent = $"{_players[attackerId].Name} eliminated {defender.Name}'s general";
-        }
-    }
-
-    private void PenalizeMorale(int playerId, double amount)
-    {
-        foreach (var garrison in _cities.SelectMany(city => city.Garrisons)
-                     .Where(pair => pair.Key == playerId)
-                     .Select(pair => pair.Value))
-        {
-            garrison.Morale = Math.Max(0.05, garrison.Morale - amount);
-        }
+        city.OwnerId = occupant.PlayerId;
+        occupant.Morale = Math.Min(1.25, occupant.Morale + 0.12);
+        _lastEvent = $"{_players[occupant.PlayerId].Name} captured {city.Name}";
     }
 
     private void PlanAndDispatch()
@@ -411,7 +453,7 @@ public sealed class GameSimulation
             if (player.Kind == PlayerKind.Ai)
                 UpdateAiPlan(player);
 
-            TryDispatch(player);
+            AssignUnitOrders(player);
         }
     }
 
@@ -443,19 +485,19 @@ public sealed class GameSimulation
         var owned = _cities.Count(city => city.OwnerId == player.Id);
         var ownUnits = CountUnits(player.Id);
         var enemyUnits = _players.Where(p => p.Id != player.Id && !p.IsEliminated).Sum(p => CountUnits(p.Id));
-        var commanderCity = _cities[player.CommanderCityId];
+        var commanderCell = GetLeaderUnit(player, UnitKind.Commander)?.Cell ?? _cities[player.HomeCityId].GridPosition;
 
         var cityObservations = _cities
             .Select(city =>
             {
-                var distance = city.GridPosition.ManhattanDistanceTo(commanderCity.GridPosition);
+                var distance = city.GridPosition.ManhattanDistanceTo(commanderCell);
                 return new CityObservation(
                     city.Id,
                     city.OwnerId == player.Id ? 1 : 0,
                     city.OwnerId == GameConstants.NeutralPlayerId ? 1 : 0,
                     city.OwnerId >= 0 && city.OwnerId != player.Id ? 1 : 0,
-                    Normalize(city.TotalUnitsFor(player.Id), 10),
-                    Normalize(city.TotalEnemyUnitsFor(player.Id), 10),
+                    Normalize(CountUnitsNearCity(city, player.Id, 2), 8),
+                    Normalize(CountEnemyUnitsNearCity(city, player.Id, 2), 8),
                     Normalize(distance, _grid.Width + _grid.Height));
             })
             .ToList();
@@ -466,89 +508,131 @@ public sealed class GameSimulation
             owned / (double)totalCities,
             ownUnits / Math.Max(1.0, ownUnits + enemyUnits),
             Normalize(player.Resources, 20),
-            Normalize(player.CommanderHealth, 100),
-            Normalize(player.GeneralHealth, 200),
+            Normalize(player.CommanderHealth, TacticalUnit.DefaultHealth(UnitKind.Commander)),
+            Normalize(player.GeneralHealth, TacticalUnit.DefaultHealth(UnitKind.General)),
             Tick / (double)Settings.MatchLengthTicks,
             cityObservations);
     }
 
-    private void TryDispatch(PlayerState player)
+    private void AssignUnitOrders(PlayerState player)
     {
         if (player.Directive == PlayerDirective.Hold)
-            return;
-
-        var target = _cities[player.TargetCityId];
-        var source = SelectSourceCity(player, target);
-        if (source == null || source.Id == target.Id)
-            return;
-
-        var path = FindGridPath(source.GridPosition, target.GridPosition);
-        if (path.Count < 2)
-            return;
-
-        var garrison = source.GetOrCreateGarrison(player.Id);
-        var available = garrison.TotalUnits;
-        if (available <= 2)
-            return;
-
-        var sendTarget = player.Directive == PlayerDirective.Attack
-            ? Math.Max(1, available / 2)
-            : Math.Max(1, available / 3);
-
-        var lightToSend = Math.Min(garrison.Light > 1 ? garrison.Light - 1 : garrison.Light, (int)Math.Ceiling(sendTarget * player.LightPreference));
-        var heavyToSend = Math.Min(garrison.Heavy, sendTarget - lightToSend);
-
-        if (lightToSend + heavyToSend <= 0)
-            return;
-
-        garrison.Light -= lightToSend;
-        garrison.Heavy -= heavyToSend;
-
-        var distance = Math.Max(1.0, path.Skip(1).Sum(point => _grid.MoveCost(point)));
-        _movingGroups.Add(new MovingGroup
         {
-            Id = _nextGroupId++,
-            PlayerId = player.Id,
-            FromCityId = source.Id,
-            ToCityId = target.Id,
-            TargetCityId = target.Id,
-            CurrentCell = path[0],
-            Path = path,
-            PathIndex = 0,
-            CurrentPosition = _grid.ToMapPoint(path[0]),
-            Light = lightToSend,
-            Heavy = heavyToSend,
-            Morale = garrison.Morale,
-            OriginalDistance = distance,
-            DistanceRemaining = distance
-        });
+            foreach (var unit in _units.Where(unit => UnitParticipates(unit) && unit.PlayerId == player.Id))
+                ClearPath(unit);
+            return;
+        }
+
+        var target = ResolveTargetCity(player);
+        player.TargetCityId = target.Id;
+
+        foreach (var unit in _units
+                     .Where(unit => UnitParticipates(unit) && unit.PlayerId == player.Id)
+                     .OrderBy(unit => unit.Kind == UnitKind.General ? 1 : 0)
+                     .ThenBy(unit => unit.Id))
+        {
+            AssignPathToTarget(unit, target);
+        }
     }
 
-    private CityNode? SelectSourceCity(PlayerState player, CityNode target)
+    private CityNode ResolveTargetCity(PlayerState player)
     {
         if (player.Directive == PlayerDirective.Defend)
         {
-            var threatenedOwned = _cities
-                .Where(city => city.OwnerId == player.Id && city.TotalEnemyUnitsFor(player.Id) > 0)
-                .OrderByDescending(city => city.TotalEnemyUnitsFor(player.Id))
-                .FirstOrDefault();
+            var threatened = SelectThreatenedOwnedCity(player);
+            if (threatened != null)
+                return threatened;
 
-            if (threatenedOwned != null)
-                target = threatenedOwned;
+            if (player.TargetCityId >= 0 && player.TargetCityId < _cities.Count)
+                return _cities[player.TargetCityId];
         }
 
+        if (player.TargetCityId >= 0 &&
+            player.TargetCityId < _cities.Count &&
+            _cities[player.TargetCityId].OwnerId != player.Id)
+        {
+            return _cities[player.TargetCityId];
+        }
+
+        var origin = GetLeaderUnit(player, UnitKind.Commander)?.Cell ?? _cities[player.HomeCityId].GridPosition;
         return _cities
-            .Where(city => city.OwnerId == player.Id && city.Id != target.Id)
-            .OrderByDescending(city => city.TotalUnitsFor(player.Id))
-            .ThenBy(city => city.GridPosition.ManhattanDistanceTo(target.GridPosition))
-            .FirstOrDefault(city => city.TotalUnitsFor(player.Id) > 2);
+            .Where(city => city.OwnerId != player.Id)
+            .OrderBy(city => city.GridPosition.ManhattanDistanceTo(origin))
+            .ThenBy(city => city.Id)
+            .FirstOrDefault()
+            ?? _cities[player.HomeCityId];
     }
 
-    private List<GridPoint> FindGridPath(GridPoint start, GridPoint target)
+    private CityNode? SelectThreatenedOwnedCity(PlayerState player)
+        => _cities
+            .Where(city => city.OwnerId == player.Id)
+            .Select(city => new
+            {
+                City = city,
+                Pressure = CountEnemyUnitsNearCity(city, player.Id, 3)
+            })
+            .Where(item => item.Pressure > 0)
+            .OrderByDescending(item => item.Pressure)
+            .ThenBy(item => item.City.Id)
+            .Select(item => item.City)
+            .FirstOrDefault();
+
+    private void EnsureUnitPath(TacticalUnit unit)
+    {
+        if (!unit.TargetCityId.HasValue || unit.TargetCityId.Value < 0 || unit.TargetCityId.Value >= _cities.Count)
+            return;
+
+        if (unit.IsMoving && unit.PathIndex < unit.Path.Count && unit.Path[unit.PathIndex] == unit.Cell)
+            return;
+
+        AssignPathToTarget(unit, _cities[unit.TargetCityId.Value]);
+    }
+
+    private void AssignPathToTarget(TacticalUnit unit, CityNode target)
+    {
+        unit.TargetCityId = target.Id;
+        var destination = SelectDestinationCell(unit, target);
+        if (!destination.HasValue || destination.Value == unit.Cell)
+        {
+            ClearPath(unit);
+            unit.TargetCityId = target.Id;
+            return;
+        }
+
+        var blocked = BuildOccupiedCells(unit.Id).Keys.ToHashSet();
+        var path = FindGridPath(unit.Cell, destination.Value, blocked);
+        if (path.Count < 2)
+        {
+            ClearPath(unit);
+            unit.TargetCityId = target.Id;
+            return;
+        }
+
+        unit.Path = path;
+        unit.PathIndex = 0;
+        unit.StepProgress = 0;
+        unit.CurrentPosition = _grid.ToMapPoint(unit.Cell);
+    }
+
+    private GridPoint? SelectDestinationCell(TacticalUnit unit, CityNode target)
+    {
+        var occupied = BuildOccupiedCells(unit.Id);
+        if (!occupied.ContainsKey(target.GridPosition))
+            return target.GridPosition;
+
+        return FindNearestEmptyPassableCell(
+            target.GridPosition,
+            includePreferred: false,
+            exceptUnitId: unit.Id,
+            allowCityCells: false);
+    }
+
+    private List<GridPoint> FindGridPath(GridPoint start, GridPoint target, IReadOnlySet<GridPoint>? blockedCells = null)
     {
         if (!_grid.IsPassable(start) || !_grid.IsPassable(target))
             return [];
 
+        blockedCells ??= new HashSet<GridPoint>();
         var open = new List<GridPoint> { start };
         var cameFrom = new Dictionary<GridPoint, GridPoint?> { [start] = null };
         var costSoFar = new Dictionary<GridPoint, double> { [start] = 0 };
@@ -565,7 +649,7 @@ public sealed class GameSimulation
             if (current == target)
                 break;
 
-            foreach (var next in GetGridNeighbors(current, target))
+            foreach (var next in GetGridNeighbors(current, target, blockedCells))
             {
                 var newCost = costSoFar[current] + _grid.MoveCost(next);
                 if (costSoFar.TryGetValue(next, out var oldCost) && newCost >= oldCost)
@@ -593,21 +677,106 @@ public sealed class GameSimulation
         return path;
     }
 
-    private IEnumerable<GridPoint> GetGridNeighbors(GridPoint point, GridPoint target)
-    {
-        var candidates = new[]
-        {
-            new GridPoint(point.X, point.Y - 1),
-            new GridPoint(point.X + 1, point.Y),
-            new GridPoint(point.X, point.Y + 1),
-            new GridPoint(point.X - 1, point.Y)
-        };
-
-        return candidates
-            .Where(next => _grid.IsPassable(next))
+    private IEnumerable<GridPoint> GetGridNeighbors(GridPoint point, GridPoint target, IReadOnlySet<GridPoint> blockedCells)
+        => AdjacentCells(point)
+            .Where(next => _grid.IsPassable(next) && (!blockedCells.Contains(next) || next == target))
             .OrderBy(next => next.ManhattanDistanceTo(target))
             .ThenBy(next => next.X)
             .ThenBy(next => next.Y);
+
+    private TacticalUnit? FindAdjacentEnemy(TacticalUnit unit, IReadOnlyDictionary<GridPoint, TacticalUnit> occupied)
+        => AdjacentCells(unit.Cell)
+            .Select(cell => occupied.TryGetValue(cell, out var occupant) ? occupant : null)
+            .Where(enemy => enemy != null &&
+                UnitParticipates(enemy) &&
+                enemy.PlayerId != unit.PlayerId)
+            .OrderBy(enemy => enemy!.Kind == UnitKind.General ? 0 : enemy.Kind == UnitKind.Commander ? 1 : 2)
+            .ThenBy(enemy => enemy!.Id)
+            .FirstOrDefault();
+
+    private double CalculateAttackDamage(TacticalUnit attacker, TacticalUnit defender)
+    {
+        var attackerTerrain = _grid.GetCell(attacker.Cell).Terrain;
+        var defenderTerrain = _grid.GetCell(defender.Cell).Terrain;
+        var damage = attacker.AttackPower *
+            TerrainAttackModifier(attackerTerrain) *
+            LeaderSupportModifier(attacker) *
+            Math.Clamp(attacker.Morale, 0.4, 1.25);
+
+        damage /= TerrainDefenseModifier(defenderTerrain);
+
+        if (attacker.Kind == UnitKind.Tank && defenderTerrain is TerrainKind.Forest or TerrainKind.Rock)
+            damage *= 0.85;
+
+        return Math.Round(Math.Max(0.25, damage), 3);
+    }
+
+    private double LeaderSupportModifier(TacticalUnit attacker)
+    {
+        var modifier = 1.0;
+        if (_units.Any(unit => UnitParticipates(unit) &&
+                unit.PlayerId == attacker.PlayerId &&
+                unit.Id != attacker.Id &&
+                unit.Kind == UnitKind.Commander &&
+                unit.Cell.ManhattanDistanceTo(attacker.Cell) <= 2))
+        {
+            modifier += 0.15;
+        }
+
+        if (_units.Any(unit => UnitParticipates(unit) &&
+                unit.PlayerId == attacker.PlayerId &&
+                unit.Id != attacker.Id &&
+                unit.Kind == UnitKind.General &&
+                unit.Cell.ManhattanDistanceTo(attacker.Cell) <= 3))
+        {
+            modifier += 0.10;
+        }
+
+        return modifier;
+    }
+
+    private static double TerrainAttackModifier(TerrainKind terrain)
+        => terrain switch
+        {
+            TerrainKind.Road => 1.08,
+            TerrainKind.Hill => 1.1,
+            TerrainKind.Forest => 0.95,
+            TerrainKind.Rock => 0.9,
+            _ => 1.0
+        };
+
+    private static double TerrainDefenseModifier(TerrainKind terrain)
+        => terrain switch
+        {
+            TerrainKind.Road => 0.92,
+            TerrainKind.Forest => 1.15,
+            TerrainKind.Hill => 1.25,
+            TerrainKind.Rock => 1.4,
+            _ => 1.0
+        };
+
+    private void UpdateLeaderHealth()
+    {
+        foreach (var player in _players)
+        {
+            var commander = GetLeaderUnit(player, UnitKind.Commander);
+            var general = GetLeaderUnit(player, UnitKind.General);
+
+            player.CommanderHealth = commander?.Health ?? 0;
+            player.GeneralHealth = general?.Health ?? 0;
+
+            if (general == null)
+                player.IsEliminated = true;
+        }
+    }
+
+    private TacticalUnit? GetLeaderUnit(PlayerState player, UnitKind kind)
+    {
+        var unitId = kind == UnitKind.Commander ? player.CommanderUnitId : player.GeneralUnitId;
+        if (!unitId.HasValue)
+            return null;
+
+        return _units.FirstOrDefault(unit => unit.Id == unitId.Value && unit.IsAlive);
     }
 
     private void UpdateScores()
@@ -649,22 +818,137 @@ public sealed class GameSimulation
         _lastEvent = $"{_players[winnerId].Name} wins";
     }
 
-    private bool HasEnemyPresence(CityNode city, int playerId)
-        => city.Garrisons.Any(pair => pair.Key != playerId && pair.Key >= 0 && pair.Value.TotalUnits > 0);
+    private Dictionary<GridPoint, TacticalUnit> BuildOccupiedCells(int? exceptUnitId = null)
+    {
+        var occupied = new Dictionary<GridPoint, TacticalUnit>();
+        foreach (var unit in _units.Where(unit => UnitParticipates(unit) && unit.Id != exceptUnitId))
+        {
+            if (!occupied.ContainsKey(unit.Cell))
+                occupied[unit.Cell] = unit;
+        }
 
-    private bool IsEliminated(int playerId)
-        => playerId >= 0 && _players[playerId].IsEliminated;
+        return occupied;
+    }
+
+    private GridPoint? FindAdjacentEmptyCell(GridPoint origin, IReadOnlyDictionary<GridPoint, TacticalUnit> occupied)
+    {
+        var candidates = AdjacentCells(origin)
+            .Where(point => _grid.IsPassable(point) &&
+                !occupied.ContainsKey(point) &&
+                !IsCityCell(point))
+            .OrderBy(point => _grid.MoveCost(point))
+            .ThenBy(point => point.X)
+            .ThenBy(point => point.Y)
+            .ToList();
+
+        return occupied.ContainsKey(origin) && candidates.Count <= 1
+            ? null
+            : candidates.FirstOrDefaultOrNull();
+    }
+
+    private GridPoint? FindNearestEmptyPassableCell(
+        GridPoint origin,
+        bool includePreferred,
+        int? exceptUnitId = null,
+        bool allowCityCells = true)
+    {
+        var occupied = BuildOccupiedCells(exceptUnitId);
+        var maxDistance = _grid.Width + _grid.Height;
+        for (var distance = includePreferred ? 0 : 1; distance <= maxDistance; distance++)
+        {
+            foreach (var candidate in PointsAtDistance(origin, distance)
+                         .Where(_grid.Contains)
+                         .Distinct()
+                         .OrderBy(point => point.X)
+                         .ThenBy(point => point.Y))
+            {
+                if (!_grid.IsPassable(candidate) ||
+                    occupied.ContainsKey(candidate) ||
+                    !allowCityCells && IsCityCell(candidate))
+                {
+                    continue;
+                }
+
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
+    private bool IsOccupiedByOtherUnit(
+        GridPoint point,
+        int unitId,
+        IReadOnlyDictionary<GridPoint, TacticalUnit> occupied)
+        => occupied.TryGetValue(point, out var occupant) && occupant.Id != unitId;
+
+    private bool UnitParticipates(TacticalUnit? unit)
+        => unit is { IsAlive: true } &&
+            unit.PlayerId >= 0 &&
+            unit.PlayerId < _players.Count &&
+            !_players[unit.PlayerId].IsEliminated;
 
     private int CountUnits(int playerId)
-        => _cities.Sum(city => city.TotalUnitsFor(playerId))
-           + _movingGroups.Where(group => group.PlayerId == playerId).Sum(group => group.TotalUnits);
+        => _units.Count(unit => UnitParticipates(unit) && unit.PlayerId == playerId);
 
-    private static void RemoveWeakestUnit(Garrison garrison)
+    private int CountUnitsOnCity(CityNode city, int playerId)
+        => _units.Count(unit => UnitParticipates(unit) && unit.PlayerId == playerId && unit.Cell == city.GridPosition);
+
+    private int CountEnemyUnitsOnCity(CityNode city, int playerId)
+        => _units.Count(unit => UnitParticipates(unit) && unit.PlayerId != playerId && unit.Cell == city.GridPosition);
+
+    private int CountAllUnitsOnCity(CityNode city)
+        => _units.Count(unit => UnitParticipates(unit) && unit.Cell == city.GridPosition);
+
+    private int CountUnitsNearCity(CityNode city, int playerId, int radius)
+        => _units.Count(unit => UnitParticipates(unit) &&
+            unit.PlayerId == playerId &&
+            unit.Cell.ManhattanDistanceTo(city.GridPosition) <= radius);
+
+    private int CountEnemyUnitsNearCity(CityNode city, int playerId, int radius)
+        => _units.Count(unit => UnitParticipates(unit) &&
+            unit.PlayerId != playerId &&
+            unit.Cell.ManhattanDistanceTo(city.GridPosition) <= radius);
+
+    private bool IsCityCell(GridPoint point)
+        => _cities.Any(city => city.GridPosition == point);
+
+    private static bool AreAdjacent(GridPoint left, GridPoint right)
+        => left.ManhattanDistanceTo(right) == 1;
+
+    private static GridPoint Offset(GridPoint point, int dx, int dy)
+        => new(point.X + dx, point.Y + dy);
+
+    private static IEnumerable<GridPoint> AdjacentCells(GridPoint point)
     {
-        if (garrison.Light > 0)
-            garrison.Light--;
-        else if (garrison.Heavy > 0)
-            garrison.Heavy--;
+        yield return new GridPoint(point.X, point.Y - 1);
+        yield return new GridPoint(point.X + 1, point.Y);
+        yield return new GridPoint(point.X, point.Y + 1);
+        yield return new GridPoint(point.X - 1, point.Y);
+    }
+
+    private static IEnumerable<GridPoint> PointsAtDistance(GridPoint origin, int distance)
+    {
+        if (distance == 0)
+        {
+            yield return origin;
+            yield break;
+        }
+
+        for (var dx = -distance; dx <= distance; dx++)
+        {
+            var dy = distance - Math.Abs(dx);
+            yield return new GridPoint(origin.X + dx, origin.Y + dy);
+            if (dy != 0)
+                yield return new GridPoint(origin.X + dx, origin.Y - dy);
+        }
+    }
+
+    private static void ClearPath(TacticalUnit unit)
+    {
+        unit.Path = [];
+        unit.PathIndex = 0;
+        unit.StepProgress = 0;
     }
 
     private static MapPoint Interpolate(MapPoint from, MapPoint to, double progress)
@@ -677,4 +961,15 @@ public sealed class GameSimulation
 
     private static double Normalize(double value, double max)
         => Math.Clamp(value / max, 0, 1);
+}
+
+internal static class EnumerableGridPointExtensions
+{
+    public static GridPoint? FirstOrDefaultOrNull(this IEnumerable<GridPoint> source)
+    {
+        foreach (var point in source)
+            return point;
+
+        return null;
+    }
 }

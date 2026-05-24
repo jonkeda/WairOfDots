@@ -56,10 +56,14 @@ public sealed record MapStateDto(
     int BlockedCellCount,
     int CityMarkerCount,
     int UnitMarkerCount,
-    int MovingGroupCount,
-    int MovingGroupGridStepCount,
+    int MovingUnitCount,
+    int MovingUnitGridStepCount,
     int CommanderMarkerCount,
-    int GeneralMarkerCount);
+    int GeneralMarkerCount,
+    int OccupiedCellCount,
+    int CityOccupiedCellCount,
+    int DuplicateOccupiedCellCount,
+    int ActiveCombatCount);
 
 public sealed record UiDiagnosticsDto(
     IReadOnlyList<string> VisibleTexts,

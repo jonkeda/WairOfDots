@@ -61,30 +61,52 @@ public sealed class MenuAndGameplayTests : IAsyncLifetime
         Assert.True(map.UnitMarkerCount >= 5);
         Assert.Equal(5, map.CommanderMarkerCount);
         Assert.Equal(5, map.GeneralMarkerCount);
+        Assert.Equal(map.UnitMarkerCount, map.OccupiedCellCount);
+        Assert.Equal(0, map.DuplicateOccupiedCellCount);
     }
 
     [Fact]
-    public void GridMovement_ReportsMovingGroupsOnCells()
+    public void GridMovement_ReportsMovingUnitsOnCells()
     {
         GameQueryHelpers.StartMatch(_fixture.Context, seed: 31, aiPlayers: 4);
         GameQueryHelpers.StepTicks(_fixture.Context, 12);
 
         var map = GameQueryHelpers.GetMapState(_fixture.Context);
 
-        Assert.True(map.MovingGroupCount > 0);
-        Assert.True(map.MovingGroupGridStepCount > 0);
+        Assert.True(map.MovingUnitCount > 0);
+        Assert.True(map.MovingUnitGridStepCount > 0);
+        Assert.Equal(0, map.DuplicateOccupiedCellCount);
+    }
+
+    [Fact]
+    public void Combat_ReportsEngagementThroughMapState()
+    {
+        GameQueryHelpers.StartMatch(_fixture.Context, seed: 31, aiPlayers: 4);
+
+        var observedCombat = false;
+        for (var i = 0; i < 60; i++)
+        {
+            var snapshot = GameQueryHelpers.StepTicks(_fixture.Context, 4);
+            var map = GameQueryHelpers.GetMapState(_fixture.Context);
+            if (map.ActiveCombatCount > 0 ||
+                snapshot.LastEvent.Contains("attacked", StringComparison.OrdinalIgnoreCase))
+            {
+                observedCombat = true;
+                break;
+            }
+        }
+
+        Assert.True(observedCombat);
     }
 
     [Fact]
     public void FixedSeed_ReplaysDeterministically()
     {
         GameQueryHelpers.StartMatch(_fixture.Context, seed: 44, aiPlayers: 4);
-        GameQueryHelpers.StepTicks(_fixture.Context, 80);
-        var first = GameQueryHelpers.GetFingerprint(_fixture.Context).Fingerprint;
+        var first = GameQueryHelpers.StepTicks(_fixture.Context, 80).Fingerprint;
 
         GameQueryHelpers.StartMatch(_fixture.Context, seed: 44, aiPlayers: 4);
-        GameQueryHelpers.StepTicks(_fixture.Context, 80);
-        var second = GameQueryHelpers.GetFingerprint(_fixture.Context).Fingerprint;
+        var second = GameQueryHelpers.StepTicks(_fixture.Context, 80).Fingerprint;
 
         Assert.Equal(first, second);
     }

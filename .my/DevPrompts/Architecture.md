@@ -18,14 +18,15 @@
 
 ## MVP Mechanics
 
-- Cities are connected graph nodes.
-- Owned cities generate resources and units.
-- Unit groups move along edges toward targets.
-- Light units are cheaper/faster; Heavy units are slower/stronger.
-- Cities over capacity lose morale.
-- Multiple players in one city fight until one side remains.
-- Capturing a city holding a commander damages or kills that commander.
-- Capturing a city holding a general damages or kills that general.
+- Cities are command, capture, and production targets on a passable terrain grid.
+- Owned cities generate resources and produce infantry/tanks onto adjacent empty cells.
+- Infantry, tanks, commanders, and generals are addressable tactical units.
+- Each grid cell can hold only one living unit, and each city cell can hold only one living unit.
+- Units move across passable grid cells toward city targets.
+- Friendly units block movement into occupied cells.
+- Enemy units fight from adjacent cells instead of stacking into one cell.
+- Terrain affects movement cost and combat attack/defense.
+- Commanders and generals are movable units with special health/defeat consequences.
 - A player is eliminated when their general falls.
 - The match ends when one player remains, the human controls all cities, or the match timer expires.
 
@@ -45,7 +46,7 @@ AI returns:
 
 - Directive: Attack, Hold, or Defend.
 - Target city.
-- Light/heavy preference.
+- Infantry/tank production preference.
 - Aggression score.
 
 ## Testing Contract

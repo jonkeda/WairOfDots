@@ -61,11 +61,11 @@ public sealed class WairAutomationHandler : IAutomationHandler
     private MapStateResponse CreateMapState()
     {
         var simulation = _simulationProvider();
-        var activePlayers = simulation.Players.Count(player => !player.IsEliminated);
-        var unitMarkers = simulation.Cities
-            .SelectMany(city => city.Garrisons)
-            .Count(pair => pair.Key >= 0 && pair.Value.TotalUnits > 0)
-            + simulation.MovingGroups.Count(group => group.TotalUnits > 0);
+        var activeUnits = simulation.Units
+            .Where(unit => unit.IsAlive && !simulation.Players[unit.PlayerId].IsEliminated)
+            .ToList();
+        var occupiedCells = activeUnits.Select(unit => unit.Cell).Distinct().Count();
+        var cityOccupiedCells = simulation.Cities.Count(city => activeUnits.Any(unit => unit.Cell == city.GridPosition));
 
         return new MapStateResponse(
             simulation.Terrain.Count,
@@ -75,11 +75,15 @@ public sealed class WairAutomationHandler : IAutomationHandler
             simulation.Grid.Cells.Count(cell => cell.IsPassable),
             simulation.Grid.Cells.Count(cell => !cell.IsPassable),
             simulation.Cities.Count,
-            unitMarkers,
-            simulation.MovingGroups.Count,
-            simulation.MovingGroups.Sum(group => group.RemainingGridSteps),
-            activePlayers,
-            activePlayers);
+            activeUnits.Count,
+            simulation.MovingUnitCount,
+            simulation.MovingUnitGridStepCount,
+            activeUnits.Count(unit => unit.Kind == UnitKind.Commander),
+            activeUnits.Count(unit => unit.Kind == UnitKind.General),
+            occupiedCells,
+            cityOccupiedCells,
+            activeUnits.Count - occupiedCells,
+            simulation.ActiveCombatCount);
     }
 
     private UiDiagnosticsResponse CreateUiDiagnostics()
@@ -245,10 +249,14 @@ public sealed record MapStateResponse(
     int BlockedCellCount,
     int CityMarkerCount,
     int UnitMarkerCount,
-    int MovingGroupCount,
-    int MovingGroupGridStepCount,
+    int MovingUnitCount,
+    int MovingUnitGridStepCount,
     int CommanderMarkerCount,
-    int GeneralMarkerCount);
+    int GeneralMarkerCount,
+    int OccupiedCellCount,
+    int CityOccupiedCellCount,
+    int DuplicateOccupiedCellCount,
+    int ActiveCombatCount);
 
 public sealed record UiDiagnosticsResponse(
     IReadOnlyList<string> VisibleTexts,

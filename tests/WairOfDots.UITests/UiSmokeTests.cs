@@ -28,6 +28,7 @@ public sealed class UiSmokeTests : IAsyncLifetime
         Assert.True(game.MapCanvas.IsVisible());
         Assert.True(map.CityMarkerCount >= 7);
         Assert.True(map.UnitMarkerCount >= 5);
+        Assert.Equal(0, map.DuplicateOccupiedCellCount);
         Assert.True(map.PassableCellCount > map.BlockedCellCount);
     }
 

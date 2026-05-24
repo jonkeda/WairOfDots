@@ -21,8 +21,10 @@ Use this checklist for player acceptance testing.
 
 - [ ] The play screen shows a large tactical map.
 - [ ] The map has multiple terrain types: land, water, road, hill/rock, and forest.
-- [ ] Cities appear as clickable circles.
+- [ ] Cities appear as clickable diamonds.
 - [ ] Units, commanders, and generals appear as circle markers.
+- [ ] No grid cell visibly holds more than one unit marker.
+- [ ] At most one unit marker appears on a city diamond.
 - [ ] Moving units travel across the map grid rather than along city-to-city edges.
 - [ ] No Oravey/debug camera instruction overlay appears over the map or HUD.
 - [ ] The HUD shows tick, phase, seed, AI count, score, resources, general health, directive, target, last event, and AI telemetry.
@@ -35,8 +37,8 @@ Use this checklist for player acceptance testing.
 - [ ] Select `Attack` and confirm the directive changes to Attack.
 - [ ] Select `Hold` and confirm the directive changes to Hold.
 - [ ] Select `Defend` and confirm the directive changes to Defend.
-- [ ] Select `More Light` and confirm the Light percentage increases.
-- [ ] Select `More Heavy` and confirm the Light percentage decreases.
+- [ ] Select `More Infantry` and confirm the Infantry percentage increases.
+- [ ] Select `More Tanks` and confirm the Infantry percentage decreases.
 
 ## Simulation
 
@@ -46,6 +48,7 @@ Use this checklist for player acceptance testing.
 - [ ] Confirm city ownership changes over time.
 - [ ] Confirm AI telemetry appears after the first planning interval.
 - [ ] Confirm combat/capture events appear in the last event text.
+- [ ] Confirm adjacent enemy units can fight without stacking onto the same cell.
 
 ## Pause And Restart
 
