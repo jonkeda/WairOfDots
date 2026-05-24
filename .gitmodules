@@ -1,0 +1,6 @@
+[submodule "Oravey2"]
+	path = Oravey2
+	url = https://github.com/jonkeda/Oravey2.git
+[submodule "Brinell"]
+	path = Brinell
+	url = https://github.com/jonkeda/Brinell.git

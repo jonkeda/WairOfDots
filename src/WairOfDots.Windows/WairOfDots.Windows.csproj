@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NoWarn>$(NoWarn);NU1903</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Stride.Engine" Version="4.3.0.2507" />
+    <PackageReference Include="Stride.UI" Version="4.3.0.2507" />
+    <PackageReference Include="Stride.Graphics" Version="4.3.0.2507" />
+    <PackageReference Include="Stride.Rendering" Version="4.3.0.2507" />
+    <PackageReference Include="Stride.CommunityToolkit" Version="1.0.0-preview.62" />
+    <PackageReference Include="Stride.CommunityToolkit.Windows" Version="1.0.0-preview.62" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\WairOfDots.Core\WairOfDots.Core.csproj" />
+    <ProjectReference Include="..\..\Brinell\srcnew\Brinell.Automation\Brinell.Automation.csproj" />
+  </ItemGroup>
+
+</Project>

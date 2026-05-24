@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/WairOfDots.Core/WairOfDots.Core.csproj" />
+    <Project Path="src/WairOfDots.Windows/WairOfDots.Windows.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/WairOfDots.Tests/WairOfDots.Tests.csproj" />
+    <Project Path="tests/WairOfDots.UITests/WairOfDots.UITests.csproj" />
+  </Folder>
+</Solution>
