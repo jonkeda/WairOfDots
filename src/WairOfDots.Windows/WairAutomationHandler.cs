@@ -45,6 +45,7 @@ public sealed class WairAutomationHandler : IAutomationHandler
             "GetSnapshot" => Ok(_simulationProvider().CreateSnapshot()),
             "GetFingerprint" => Ok(new FingerprintResponse(_simulationProvider().CreateFingerprint())),
             "StepTicks" => StepTicks(command),
+            "StepToTick" => StepToTick(command),
             "StartMatch" => StartMatch(command),
             "StartAiOnly" => StartAiOnly(command),
             "RestartMatch" => RestartMatch(),
@@ -55,8 +56,19 @@ public sealed class WairAutomationHandler : IAutomationHandler
             "TogglePause" => TogglePause(),
             "GetTelemetry" => Ok(_simulationProvider().Telemetry.TakeLast(10).ToList()),
             "GetStandings" => Ok(_simulationProvider().CreateSnapshot().Standings),
+            "GetAiStates" => Ok(CreateAiStates()),
             "GetUnitVisuals" => Ok(_game.CreateUnitVisualStates()),
             "GetMapState" => Ok(CreateMapState()),
+            "GetCellControls" => Ok(_simulationProvider().CreateSnapshot().CellControls),
+            "GetTerritoryBoundaries" => Ok(_simulationProvider().CreateTerritoryBoundaries()),
+            "GetEconomies" => Ok(_simulationProvider().CreateSnapshot().Economies),
+            "GetRegions" => Ok(_simulationProvider().CreateSnapshot().Regions),
+            "GetVisibility" => Ok(_simulationProvider().CreateSnapshot().Visibility),
+            "RunTrainingSmoke" => RunTrainingSmoke(command),
+            "RunTrainingPipeline" => RunTrainingPipeline(command),
+            "ExportBehaviorReview" => Ok(BehaviorReviewExporter.ToMarkdown(
+                _simulationProvider().CreateSnapshot(),
+                _simulationProvider().Telemetry.ToList())),
             "GetUiDiagnostics" => Ok(CreateUiDiagnostics()),
             _ => null
         };
@@ -87,20 +99,52 @@ public sealed class WairAutomationHandler : IAutomationHandler
             occupiedCells,
             cityOccupiedCells,
             activeUnits.Count - occupiedCells,
-            simulation.ActiveCombatCount);
+            simulation.ActiveCombatCount,
+            simulation.CellControls.Count,
+            simulation.CellControls.Count(cell => cell.OwnerId == GameConstants.NeutralPlayerId),
+            simulation.CellControls.Count(cell => cell.OwnerId >= 0),
+            Math.Round(simulation.CellControls.Sum(cell => cell.TaxValue), 2),
+            simulation.TerritoryBoundaries.Count,
+            simulation.Cities
+                .OrderBy(city => city.Id)
+                .Select(city => new CityOwnershipResponse(city.Id, city.Name, city.OwnerId))
+                .ToArray());
+    }
+
+    private IReadOnlyList<AiStateResponse> CreateAiStates()
+    {
+        var simulation = _simulationProvider();
+        return simulation.Players
+            .Where(player => player.Kind == PlayerKind.Ai)
+            .OrderBy(player => player.Id)
+            .Select(player => new AiStateResponse(
+                player.Id,
+                player.Name,
+                player.GenomeId,
+                GenomeNeatController.ResolveArchetype(player.GenomeId),
+                player.Directive.ToString(),
+                player.TargetCityId,
+                player.StrategyMode.ToString(),
+                player.ConsecutiveHoldPlans,
+                player.IsEliminated,
+                simulation.Units.Count(unit => unit.IsAlive && unit.PlayerId == player.Id),
+                simulation.Units.Count(unit => unit.IsAlive && unit.PlayerId == player.Id && unit.IsMoving)))
+            .ToList();
     }
 
     private UiDiagnosticsResponse CreateUiDiagnostics()
     {
         var visibleTexts = new List<string>();
+        var visibleElementNames = new List<string>();
         var uiEntityNames = new List<string>();
         var componentTypeNames = new List<string>();
         var rootScene = _game.SceneSystem.SceneInstance.RootScene;
 
-        CollectSceneDiagnostics(rootScene, visibleTexts, uiEntityNames, componentTypeNames);
+        CollectSceneDiagnostics(rootScene, visibleTexts, visibleElementNames, uiEntityNames, componentTypeNames);
 
         return new UiDiagnosticsResponse(
             visibleTexts,
+            visibleElementNames,
             uiEntityNames,
             componentTypeNames,
             componentTypeNames.Count(name => name == nameof(CameraComponent)),
@@ -111,6 +155,7 @@ public sealed class WairAutomationHandler : IAutomationHandler
     private static void CollectSceneDiagnostics(
         Scene scene,
         List<string> visibleTexts,
+        List<string> visibleElementNames,
         List<string> uiEntityNames,
         List<string> componentTypeNames)
     {
@@ -123,29 +168,35 @@ public sealed class WairAutomationHandler : IAutomationHandler
             if (uiComponent?.Page?.RootElement != null)
             {
                 uiEntityNames.Add(entity.Name);
-                CollectVisibleTexts(uiComponent.Page.RootElement, visibleTexts);
+                CollectVisibleElements(uiComponent.Page.RootElement, visibleTexts, visibleElementNames);
             }
         }
 
         foreach (var childScene in scene.Children)
-            CollectSceneDiagnostics(childScene, visibleTexts, uiEntityNames, componentTypeNames);
+            CollectSceneDiagnostics(childScene, visibleTexts, visibleElementNames, uiEntityNames, componentTypeNames);
     }
 
-    private static void CollectVisibleTexts(UIElement element, List<string> visibleTexts)
+    private static void CollectVisibleElements(
+        UIElement element,
+        List<string> visibleTexts,
+        List<string> visibleElementNames)
     {
         if (element.Visibility != Visibility.Visible)
             return;
+
+        if (!string.IsNullOrWhiteSpace(element.Name))
+            visibleElementNames.Add(element.Name);
 
         if (element is TextBlock textBlock && !string.IsNullOrWhiteSpace(textBlock.Text))
             visibleTexts.Add(textBlock.Text);
 
         if (element is ContentControl { Content: UIElement contentElement })
-            CollectVisibleTexts(contentElement, visibleTexts);
+            CollectVisibleElements(contentElement, visibleTexts, visibleElementNames);
 
         if (element is Panel panel)
         {
             foreach (var child in panel.Children)
-                CollectVisibleTexts(child, visibleTexts);
+                CollectVisibleElements(child, visibleTexts, visibleElementNames);
         }
     }
 
@@ -156,12 +207,22 @@ public sealed class WairAutomationHandler : IAutomationHandler
         return Ok(_simulationProvider().CreateSnapshot());
     }
 
+    private AutomationResponse StepToTick(AutomationCommand command)
+    {
+        var targetTick = GetInt(command, 0, 1);
+        _game.StepToTick(targetTick);
+        return Ok(_simulationProvider().CreateSnapshot());
+    }
+
     private AutomationResponse StartMatch(AutomationCommand command)
     {
         var seed = GetInt(command, 0, 1337);
         var aiPlayers = GetInt(command, 1, 4);
         var mode = GetMode(command, 2, GameMode.HumanVsAi);
-        _game.StartMatch(seed, aiPlayers, mode);
+        var humanMode = GetHumanControlMode(command, 3, HumanControlMode.General);
+        _game.StartMatch(seed, aiPlayers, mode, WairOfDotsGame.FastSimulationSpeed);
+        if (mode == GameMode.HumanVsAi)
+            _game.SetHumanControlMode(humanMode);
         return Ok(_simulationProvider().CreateSnapshot());
     }
 
@@ -169,7 +230,7 @@ public sealed class WairAutomationHandler : IAutomationHandler
     {
         var seed = GetInt(command, 0, 1337);
         var aiPlayers = GetInt(command, 1, 4);
-        _game.StartMatch(seed, aiPlayers, GameMode.AiOnly);
+        _game.StartMatch(seed, aiPlayers, GameMode.AiOnly, WairOfDotsGame.FastSimulationSpeed);
         return Ok(_simulationProvider().CreateSnapshot());
     }
 
@@ -203,7 +264,7 @@ public sealed class WairAutomationHandler : IAutomationHandler
 
     private AutomationResponse SetSimulationSpeed(AutomationCommand command)
     {
-        _game.SetSimulationSpeed(GetInt(command, 0, 1));
+        _game.SetSimulationSpeed(GetDouble(command, 0, WairOfDotsGame.NormalSimulationSpeed));
         return Ok(_simulationProvider().CreateSnapshot());
     }
 
@@ -211,6 +272,23 @@ public sealed class WairAutomationHandler : IAutomationHandler
     {
         _game.TogglePause();
         return Ok(_simulationProvider().CreateSnapshot());
+    }
+
+    private AutomationResponse RunTrainingSmoke(AutomationCommand command)
+    {
+        var seed = GetInt(command, 0, 1337);
+        var aiPlayers = GetInt(command, 1, 4);
+        var ticks = GetInt(command, 2, 120);
+        return Ok(DeterministicTrainingRunner.RunSmoke(seed, aiPlayers, ticks));
+    }
+
+    private AutomationResponse RunTrainingPipeline(AutomationCommand command)
+    {
+        var seed = GetInt(command, 0, 1337);
+        var aiPlayers = GetInt(command, 1, 4);
+        var ticks = GetInt(command, 2, 120);
+        var generations = GetInt(command, 3, 1);
+        return Ok(HeadlessTrainingPipeline.Run(new TrainingSettings(seed, aiPlayers, ticks, generations)));
     }
 
     private static AutomationResponse Ok(object value)
@@ -259,6 +337,12 @@ public sealed class WairAutomationHandler : IAutomationHandler
         return Enum.TryParse<GameMode>(value, ignoreCase: true, out var mode) ? mode : fallback;
     }
 
+    private static HumanControlMode GetHumanControlMode(AutomationCommand command, int index, HumanControlMode fallback)
+    {
+        var value = GetString(command, index, fallback.ToString());
+        return Enum.TryParse<HumanControlMode>(value, ignoreCase: true, out var mode) ? mode : fallback;
+    }
+
     private static object? GetArg(AutomationCommand command, int index)
         => command.Args != null && command.Args.Length > index ? command.Args[index] : null;
 }
@@ -281,7 +365,31 @@ public sealed record MapStateResponse(
     int OccupiedCellCount,
     int CityOccupiedCellCount,
     int DuplicateOccupiedCellCount,
-    int ActiveCombatCount);
+    int ActiveCombatCount,
+    int ControlledCellCount,
+    int NeutralControlledCellCount,
+    int PlayerControlledCellCount,
+    double TotalTaxValue,
+    int TerritoryBoundaryCount,
+    IReadOnlyList<CityOwnershipResponse> CityOwners);
+
+public sealed record CityOwnershipResponse(
+    int CityId,
+    string Name,
+    int OwnerId);
+
+public sealed record AiStateResponse(
+    int PlayerId,
+    string Name,
+    string GenomeId,
+    string Archetype,
+    string Directive,
+    int TargetCityId,
+    string StrategyMode,
+    int ConsecutiveHoldPlans,
+    bool IsEliminated,
+    int UnitCount,
+    int MovingUnitCount);
 
 public sealed record UnitVisualStateResponse(
     int UnitId,
@@ -300,10 +408,12 @@ public sealed record UnitVisualStateResponse(
     double VisualX,
     double VisualY,
     double Progress,
-    bool IsInterpolating);
+    bool IsInterpolating,
+    bool IsUsingSmoothedSegment);
 
 public sealed record UiDiagnosticsResponse(
     IReadOnlyList<string> VisibleTexts,
+    IReadOnlyList<string> VisibleElementNames,
     IReadOnlyList<string> UiEntityNames,
     IReadOnlyList<string> ComponentTypeNames,
     int CameraComponentCount,

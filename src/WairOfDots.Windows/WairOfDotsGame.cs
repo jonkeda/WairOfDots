@@ -16,7 +16,13 @@ public sealed class WairOfDotsGame : Game
 {
     private const int UiWidth = 1280;
     private const int UiHeight = 720;
+    private const float MapCanvasWidth = 890f;
+    private const float MapCanvasHeight = 660f;
     private const double FixedTickSeconds = 1.0 / 8.0;
+    internal const double SlowSimulationSpeed = 0.5;
+    internal const double NormalSimulationSpeed = 1.0;
+    internal const double FastSimulationSpeed = 8.0;
+    private const double MinimumSimulationSpeed = 0.25;
 
     private GameSimulation _simulation = GameSimulation.Create(new GameSettings());
     private readonly object _stateLock = new();
@@ -25,6 +31,8 @@ public sealed class WairOfDotsGame : Game
     private UIElement? _mainUi;
     private UIComponent? _uiComponent;
     private SpriteFont? _font;
+    private MapSpriteRenderer? _mapRenderer;
+    private MatchSnapshot? _lastSnapshot;
     private StackPanel? _menuPanel;
     private StackPanel? _hudPanel;
     private Canvas? _mapCanvas;
@@ -33,7 +41,6 @@ public sealed class WairOfDotsGame : Game
     private StackPanel? _humanCommandPanel;
     private StackPanel? _spectatorControlsPanel;
     private StackPanel? _standingsPanel;
-    private StackPanel? _cityListPanel;
     private TextBlock? _statusText;
     private TextBlock? _scoreText;
     private TextBlock? _targetText;
@@ -42,12 +49,16 @@ public sealed class WairOfDotsGame : Game
     private TextBlock? _endText;
     private TextBlock? _pauseButtonText;
     private TextBlock? _humanToggleText;
+    private TextBlock? _humanRoleText;
     private TextBlock? _speedText;
     private EditText? _seedInput;
     private EditText? _aiCountInput;
     private ToggleButton? _humanPlayerToggle;
+    private ToggleButton? _humanRoleToggle;
+    private bool _mapHitTargetsReady;
     private int _selectedTargetCityId;
-    private int _simulationSpeed = 1;
+    private HumanControlMode _selectedHumanControlMode = HumanControlMode.General;
+    private double _simulationSpeed = SlowSimulationSpeed;
 
     public UIElement? MainUI => _mainUi;
     public GameSimulation Simulation => _simulation;
@@ -82,11 +93,10 @@ public sealed class WairOfDotsGame : Game
 
             if (_simulation.Phase == MatchPhase.Running)
             {
-                _tickAccumulator += gameTime.Elapsed.TotalSeconds;
+                _tickAccumulator += gameTime.Elapsed.TotalSeconds * _simulationSpeed;
                 while (_tickAccumulator >= FixedTickSeconds)
                 {
-                    for (var i = 0; i < _simulationSpeed; i++)
-                        _simulation.Step(1);
+                    _simulation.Step(1);
                     _tickAccumulator -= FixedTickSeconds;
                 }
 
@@ -101,26 +111,58 @@ public sealed class WairOfDotsGame : Game
         }
     }
 
-    public void StartMatch(int? seed = null, int? aiPlayers = null, GameMode? mode = null)
+    protected override void Draw(GameTime gameTime)
+    {
+        base.Draw(gameTime);
+
+        lock (_stateLock)
+        {
+            if (_mapRenderer == null ||
+                _lastSnapshot == null ||
+                _hudPanel?.Visibility != Visibility.Visible ||
+                _endPanel?.Visibility == Visibility.Visible)
+            {
+                return;
+            }
+
+            var unitPositions = _simulation.Units
+                .Where(unit => unit.IsAlive)
+                .ToDictionary(unit => unit.Id, ResolveUnitRenderPosition);
+            var engagedUnitIds = _simulation.Units
+                .Where(unit => unit.IsAlive && IsEngaged(unit))
+                .Select(unit => unit.Id)
+                .ToHashSet();
+            var selectedCityId = _lastSnapshot.HasHumanPlayer
+                ? _lastSnapshot.HumanTargetCityId
+                : _selectedTargetCityId;
+
+            _mapRenderer.Draw(GraphicsContext, _simulation, _lastSnapshot, unitPositions, engagedUnitIds, selectedCityId);
+        }
+    }
+
+    public void StartMatch(int? seed = null, int? aiPlayers = null, GameMode? mode = null, double? simulationSpeed = null)
     {
         lock (_stateLock)
         {
             var parsedSeed = seed ?? ParseInt(_seedInput?.Text, 1337);
             var parsedAiPlayers = aiPlayers ?? ParseInt(_aiCountInput?.Text, 4);
             var parsedMode = mode ?? ResolveModeFromMenu();
+            var parsedHumanMode = ResolveHumanControlModeFromMenu();
             SetHumanToggle(parsedMode == GameMode.HumanVsAi);
             _simulation = GameSimulation.Create(new GameSettings(
                 Seed: parsedSeed,
                 AiPlayers: parsedAiPlayers,
-                Mode: parsedMode));
+                Mode: parsedMode,
+                HumanControlMode: parsedHumanMode));
             _selectedTargetCityId = 0;
+            _mapHitTargetsReady = false;
             if (_simulation.HasHumanPlayer)
                 _simulation.ApplyHumanCommand(new HumanCommand(TargetCityId: _selectedTargetCityId));
 
             _simulation.Start();
             _tickAccumulator = 0;
             _visualTickProgress = 1.0;
-            _simulationSpeed = 1;
+            _simulationSpeed = NormalizeSimulationSpeed(simulationSpeed ?? SlowSimulationSpeed);
             ShowGame();
             RefreshUi();
         }
@@ -130,7 +172,7 @@ public sealed class WairOfDotsGame : Game
     {
         lock (_stateLock)
         {
-            StartMatch(_simulation.Settings.Seed, _simulation.Settings.AiPlayers, _simulation.Settings.Mode);
+            StartMatch(_simulation.Settings.Seed, _simulation.Settings.AiPlayers, _simulation.Settings.Mode, _simulationSpeed);
         }
     }
 
@@ -139,6 +181,18 @@ public sealed class WairOfDotsGame : Game
         lock (_stateLock)
         {
             _simulation.Step(ticks);
+            _tickAccumulator = 0;
+            _visualTickProgress = 0;
+            RefreshUi();
+        }
+    }
+
+    public void StepToTick(int targetTick)
+    {
+        lock (_stateLock)
+        {
+            var remainingTicks = Math.Max(0, targetTick - _simulation.Tick);
+            _simulation.Step(remainingTicks);
             _tickAccumulator = 0;
             _visualTickProgress = 0;
             RefreshUi();
@@ -176,11 +230,23 @@ public sealed class WairOfDotsGame : Game
         }
     }
 
-    public void SetSimulationSpeed(int speed)
+    public void SetHumanControlMode(HumanControlMode mode)
     {
         lock (_stateLock)
         {
-            _simulationSpeed = Math.Clamp(speed, 1, 8);
+            if (_simulation.HasHumanPlayer)
+                _simulation.ApplyHumanCommand(new HumanCommand(ControlMode: mode));
+
+            SetHumanRoleToggle(mode);
+            RefreshUi();
+        }
+    }
+
+    public void SetSimulationSpeed(double speed)
+    {
+        lock (_stateLock)
+        {
+            _simulationSpeed = NormalizeSimulationSpeed(speed);
             RefreshUi();
         }
     }
@@ -198,6 +264,7 @@ public sealed class WairOfDotsGame : Game
     {
         this.SetupBase3D();
         _font = Content.Load<SpriteFont>("StrideDefaultFont");
+        _mapRenderer = new MapSpriteRenderer(GraphicsDevice, _font);
 
         var uiEntity = new Entity("UI");
         _uiComponent = new UIComponent
@@ -261,6 +328,7 @@ public sealed class WairOfDotsGame : Game
         panel.Children.Add(LabeledRow("Seed", _seedInput));
         panel.Children.Add(LabeledRow("AI Players", _aiCountInput));
         panel.Children.Add(CreateHumanToggleRow());
+        panel.Children.Add(CreateHumanRoleRow());
         panel.Children.Add(Spacer(12));
         panel.Children.Add(Button("StartGameButton", "Start Match", () => StartMatch()));
         panel.Children.Add(Button("SettingsButton", "Settings", ShowSettings));
@@ -282,10 +350,10 @@ public sealed class WairOfDotsGame : Game
         _mapCanvas = new Canvas
         {
             Name = "MapCanvas",
-            MinimumWidth = 890,
-            MinimumHeight = 660,
-            MaximumWidth = 890,
-            MaximumHeight = 660,
+            MinimumWidth = MapCanvasWidth,
+            MinimumHeight = MapCanvasHeight,
+            MaximumWidth = MapCanvasWidth,
+            MaximumHeight = MapCanvasHeight,
             BackgroundColor = new Color(157, 190, 60, 255),
             Margin = new Thickness(0, 0, 14, 0)
         };
@@ -340,9 +408,9 @@ public sealed class WairOfDotsGame : Game
         _speedText = Text("SpeedDisplay", "", 13, Color.White);
         _spectatorControlsPanel.Children.Add(_speedText);
         var speedRow = new StackPanel { Orientation = Orientation.Horizontal };
-        speedRow.Children.Add(Button("SpeedSlowButton", "Slower", () => SetSimulationSpeed(Math.Max(1, _simulationSpeed / 2))));
-        speedRow.Children.Add(Button("SpeedNormalButton", "Normal", () => SetSimulationSpeed(1)));
-        speedRow.Children.Add(Button("SpeedFastButton", "Faster", () => SetSimulationSpeed(Math.Min(8, _simulationSpeed * 2))));
+        speedRow.Children.Add(Button("SpeedSlowButton", "Slower", () => SetSimulationSpeed(_simulationSpeed / 2)));
+        speedRow.Children.Add(Button("SpeedNormalButton", "Normal", () => SetSimulationSpeed(NormalSimulationSpeed)));
+        speedRow.Children.Add(Button("SpeedFastButton", "Faster", () => SetSimulationSpeed(_simulationSpeed * 2)));
         _spectatorControlsPanel.Children.Add(speedRow);
         commandPanel.Children.Add(_spectatorControlsPanel);
 
@@ -368,13 +436,6 @@ public sealed class WairOfDotsGame : Game
             Orientation = Orientation.Vertical
         };
         commandPanel.Children.Add(_standingsPanel);
-
-        _cityListPanel = new StackPanel
-        {
-            Name = "CityListPanel",
-            Orientation = Orientation.Vertical
-        };
-        commandPanel.Children.Add(_cityListPanel);
 
         panel.Children.Add(commandPanel);
 
@@ -408,6 +469,8 @@ public sealed class WairOfDotsGame : Game
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
             BackgroundColor = new Color(20, 24, 30, 245),
+            MinimumWidth = 440,
+            MinimumHeight = 150,
             Margin = new Thickness(40, 40, 40, 40),
             Visibility = Visibility.Collapsed
         };
@@ -422,6 +485,10 @@ public sealed class WairOfDotsGame : Game
     private void RefreshUi()
     {
         var snapshot = _simulation.CreateSnapshot();
+        _lastSnapshot = snapshot;
+        var humanPlayer = snapshot.HasHumanPlayer
+            ? snapshot.Players.First(p => p.Id == GameConstants.HumanPlayerId)
+            : null;
 
         if (_statusText != null)
             _statusText.Text = $"Tick {snapshot.Tick} | {snapshot.Phase} | {snapshot.GameMode} | Seed {_simulation.Settings.Seed} | AI {_simulation.Settings.AiPlayers}";
@@ -430,13 +497,12 @@ public sealed class WairOfDotsGame : Game
         {
             if (snapshot.HasHumanPlayer)
             {
-                var human = snapshot.Players.First(p => p.Id == GameConstants.HumanPlayerId);
-                _scoreText.Text = $"Human score {human.Score:F0} | Resources {human.Resources:F1} | General {human.GeneralHealth:F0}";
+                _scoreText.Text = $"Human score {humanPlayer!.Score:F0} | Treasury {humanPlayer.Resources:F1} | Tax {humanPlayer.TaxIncome:F1} | Upkeep {humanPlayer.Upkeep:F1} | General {humanPlayer.GeneralHealth:F0}";
             }
             else
             {
                 var leader = snapshot.Standings.OrderByDescending(player => player.Score).ThenBy(player => player.PlayerId).First();
-                _scoreText.Text = $"Leader {leader.Name} | Score {leader.Score:F0} | Cities {leader.CityCount} | Units {leader.UnitCount}";
+                _scoreText.Text = $"Leader {leader.Name} | Score {leader.Score:F0} | Cells {leader.ControlledCellCount} | Tax {leader.TaxIncome:F1}";
             }
         }
 
@@ -445,7 +511,7 @@ public sealed class WairOfDotsGame : Game
             var selectedCityId = snapshot.HasHumanPlayer ? snapshot.HumanTargetCityId : _selectedTargetCityId;
             var target = snapshot.Cities.FirstOrDefault(c => c.Id == selectedCityId);
             _targetText.Text = snapshot.HasHumanPlayer
-                ? $"Directive {snapshot.HumanDirective} | Target {target?.Name ?? "None"} | Infantry {snapshot.HumanLightPreference:P0}"
+                ? $"Directive {snapshot.HumanDirective} | Target {target?.Name ?? "None"} | Infantry {snapshot.HumanLightPreference:P0} | Role {humanPlayer?.HumanControlMode ?? "General"}"
                 : $"Spectating {target?.Name ?? "None"} | Owner {OwnerLabel(target?.OwnerId ?? GameConstants.NeutralPlayerId, snapshot.HasHumanPlayer)} | Units {target?.TotalUnits ?? 0}";
         }
 
@@ -455,21 +521,23 @@ public sealed class WairOfDotsGame : Game
         if (_telemetryText != null)
         {
             var latest = _simulation.Telemetry.LastOrDefault();
-            _telemetryText.Text = latest == null ? "AI telemetry pending" : $"AI telemetry {latest.GenomeId}: {latest.Action}";
+            var aiStates = FormatAiStateSummary(snapshot);
+            _telemetryText.Text = latest == null
+                ? $"AI telemetry pending | {aiStates}"
+                : $"AI telemetry {latest.GenomeId}: {latest.Action} | {aiStates}";
         }
 
         if (_pauseButtonText != null)
             _pauseButtonText.Text = _simulation.Phase == MatchPhase.Paused ? "Resume" : "Pause";
 
         if (_speedText != null)
-            _speedText.Text = $"Spectator speed {_simulationSpeed}x";
+            _speedText.Text = $"Spectator speed {FormatSimulationSpeed(_simulationSpeed)}";
 
         _humanCommandPanel?.SetVisible(snapshot.HasHumanPlayer);
         _spectatorControlsPanel?.SetVisible(!snapshot.HasHumanPlayer);
         _standingsPanel?.SetVisible(!snapshot.HasHumanPlayer);
 
         RefreshStandings(snapshot);
-        RefreshCityButtons(snapshot);
         RefreshMap(snapshot);
 
         if (_endPanel != null)
@@ -486,33 +554,139 @@ public sealed class WairOfDotsGame : Game
         if (_standingsPanel == null)
             return;
 
+        var orderedStandings = snapshot.Standings.ToList();
+        var maxScore = Math.Max(1, orderedStandings.Max(standing => Math.Max(0, standing.Score)));
+        var maxCities = Math.Max(1, snapshot.Cities.Count);
+        var maxUnits = Math.Max(1, orderedStandings.Max(standing => standing.UnitCount));
+        var maxGeneralHealth = TacticalUnit.DefaultHealth(UnitKind.General);
+
         _standingsPanel.Children.Clear();
         _standingsPanel.Children.Add(Text("StandingsTitle", "Standings", 15, Color.White));
-        foreach (var standing in snapshot.Standings.OrderByDescending(player => player.Score).ThenBy(player => player.PlayerId))
-        {
-            var status = standing.IsEliminated ? "out" : "in";
-            _standingsPanel.Children.Add(Text(
-                $"Standing_{standing.PlayerId}",
-                $"{standing.Name} | {standing.Score:F0} | C {standing.CityCount} U {standing.UnitCount} | G {standing.GeneralHealth:F0} | {status}",
-                11,
-                PlayerColor(standing.PlayerId)));
-        }
+        _standingsPanel.Children.Add(CreateStandingHeader());
+        foreach (var standing in orderedStandings)
+            _standingsPanel.Children.Add(CreateStandingRow(standing, maxScore, maxCities, maxUnits, maxGeneralHealth));
     }
 
-    private void RefreshCityButtons(MatchSnapshot snapshot)
+    private UIElement CreateStandingHeader()
     {
-        if (_cityListPanel == null)
-            return;
-
-        _cityListPanel.Children.Clear();
-        foreach (var city in snapshot.Cities.OrderBy(city => city.Id))
+        var row = new StackPanel
         {
-            var owner = OwnerLabel(city.OwnerId, snapshot.HasHumanPlayer);
-            var label = snapshot.HasHumanPlayer
-                ? $"{city.Id}: {city.Name} | {owner} | H {city.HumanUnits} E {city.EnemyUnits}"
-                : $"{city.Id}: {city.Name} | {owner} | U {city.TotalUnits}";
-            _cityListPanel.Children.Add(Button($"CityButton_{city.Id}", label, () => SelectTargetCity(city.Id)));
-        }
+            Name = "StandingHeaderRow",
+            Orientation = Orientation.Horizontal,
+            MinimumHeight = 18,
+            MaximumHeight = 18,
+            Margin = new Thickness(0, 0, 0, 1)
+        };
+
+        row.Children.Add(new StackPanel
+        {
+            Name = "StandingHeaderDotSpacer",
+            MinimumWidth = 20,
+            MaximumWidth = 20
+        });
+        row.Children.Add(CreateStandingMetricHeader("Score", "Score"));
+        row.Children.Add(CreateStandingMetricHeader("Cities", "Cities"));
+        row.Children.Add(CreateStandingMetricHeader("Units", "Units"));
+        row.Children.Add(CreateStandingMetricHeader("General", "General"));
+
+        return row;
+    }
+
+    private UIElement CreateStandingMetricHeader(string metricName, string label)
+    {
+        var group = new StackPanel
+        {
+            Name = $"Standing{metricName}Header",
+            Orientation = Orientation.Vertical,
+            MinimumWidth = 70,
+            MaximumWidth = 70,
+            Margin = new Thickness(0, 0, 2, 0)
+        };
+
+        group.Children.Add(CompactText($"Standing{metricName}HeaderLabel", label, 8, Color.LightGray));
+        return group;
+    }
+
+    private UIElement CreateStandingRow(
+        StandingSnapshot standing,
+        double maxScore,
+        double maxCities,
+        double maxUnits,
+        double maxGeneralHealth)
+    {
+        var playerColor = PlayerColor(standing.PlayerId);
+        var textColor = standing.IsEliminated ? new Color(132, 136, 142, 255) : playerColor;
+        var fillColor = standing.IsEliminated ? new Color(72, 76, 84, 210) : playerColor;
+
+        var row = new StackPanel
+        {
+            Name = $"StandingRow_{standing.PlayerId}",
+            Orientation = Orientation.Horizontal,
+            MinimumHeight = 28,
+            MaximumHeight = 30,
+            Margin = new Thickness(0, 2, 0, 2)
+        };
+
+        var dot = CompactText($"StandingPlayerDot_{standing.PlayerId}", "●", 12, playerColor);
+        dot.MinimumWidth = 20;
+        dot.MaximumWidth = 20;
+        row.Children.Add(dot);
+
+        row.Children.Add(CreateStandingMetric("Score", standing.PlayerId, standing.Score, maxScore, fillColor, textColor));
+        row.Children.Add(CreateStandingMetric("Cities", standing.PlayerId, standing.CityCount, maxCities, fillColor, textColor));
+        row.Children.Add(CreateStandingMetric("Units", standing.PlayerId, standing.UnitCount, maxUnits, fillColor, textColor));
+        row.Children.Add(CreateStandingMetric("General", standing.PlayerId, standing.GeneralHealth, maxGeneralHealth, fillColor, textColor));
+
+        return row;
+    }
+
+    private UIElement CreateStandingMetric(
+        string metricName,
+        int playerId,
+        double value,
+        double maxValue,
+        Color fillColor,
+        Color textColor)
+    {
+        const float trackWidth = 64;
+        const float trackHeight = 7;
+
+        var group = new StackPanel
+        {
+            Name = $"Standing{metricName}Group_{playerId}",
+            Orientation = Orientation.Vertical,
+            MinimumWidth = 70,
+            MaximumWidth = 70,
+            Margin = new Thickness(0, 0, 2, 0)
+        };
+
+        group.Children.Add(CompactText($"Standing{metricName}Value_{playerId}", $"{value:F0}", 8, textColor));
+
+        var track = new StackPanel
+        {
+            Name = $"Standing{metricName}Track_{playerId}",
+            Orientation = Orientation.Horizontal,
+            BackgroundColor = new Color(30, 34, 42, 220),
+            MinimumWidth = trackWidth,
+            MaximumWidth = trackWidth,
+            MinimumHeight = trackHeight,
+            MaximumHeight = trackHeight
+        };
+
+        var fillWidth = Math.Clamp((float)(Math.Max(0, value) / Math.Max(1, maxValue) * trackWidth), 1, trackWidth);
+        var fill = new StackPanel
+        {
+            Name = $"Standing{metricName}Bar_{playerId}",
+            BackgroundColor = fillColor,
+            MinimumWidth = fillWidth,
+            MaximumWidth = fillWidth,
+            MinimumHeight = trackHeight,
+            MaximumHeight = trackHeight
+        };
+        track.Children.Add(fill);
+        group.Children.Add(track);
+
+        return group;
     }
 
     private void RefreshMap(MatchSnapshot snapshot)
@@ -520,26 +694,59 @@ public sealed class WairOfDotsGame : Game
         if (_mapCanvas == null)
             return;
 
+        EnsureMapHitTargets();
+    }
+
+    private void EnsureMapHitTargets()
+    {
+        if (_mapCanvas == null || _mapHitTargetsReady)
+            return;
+
         _mapCanvas.Children.Clear();
-        AddTerrainPatches();
-        AddMapLegend();
-        AddCityMarkers(snapshot);
-        AddUnitMarkers(snapshot);
+        foreach (var city in _simulation.Cities)
+        {
+            var rel = ToMapRelative(city.Position);
+            var button = new Button
+            {
+                Name = $"MapCity_{city.Id}",
+                Content = new TextBlock
+                {
+                    Name = $"MapCityHitLabel_{city.Id}",
+                    Text = string.Empty,
+                    Font = _font,
+                    TextColor = Color.Transparent
+                },
+                Padding = new Thickness(0, 0, 0, 0)
+            };
+            button.Click += (_, _) => SelectTargetCity(city.Id);
+            button.SetCanvasRelativePosition(new Vector3(rel.X, rel.Y - 0.023f, 0));
+            button.SetCanvasRelativeSize(new Vector3(0.075f, 0.075f, 0));
+            button.SetCanvasPinOrigin(new Vector3(0.5f, 0.5f, 0));
+            _mapCanvas.Children.Add(button);
+        }
+
+        _mapHitTargetsReady = true;
     }
 
     private void AddTerrainPatches()
     {
         foreach (var patch in _simulation.Terrain)
         {
+            var width = (float)(patch.Width / MapRange);
+            var height = (float)(patch.Height / MapRange);
             var element = new StackPanel
             {
                 Name = $"TerrainPatch_{patch.Id}_{patch.Kind}",
-                BackgroundColor = TerrainColor(patch.Kind)
+                BackgroundColor = TerrainColor(patch.Kind),
+                MinimumWidth = Math.Max(1f, width * MapCanvasWidth),
+                MaximumWidth = Math.Max(1f, width * MapCanvasWidth),
+                MinimumHeight = Math.Max(1f, height * MapCanvasHeight),
+                MaximumHeight = Math.Max(1f, height * MapCanvasHeight)
             };
 
             var center = ToMapRelative(patch.Center);
             element.SetCanvasRelativePosition(new Vector3(center.X, center.Y, 0));
-            element.SetCanvasRelativeSize(new Vector3((float)(patch.Width / MapRange), (float)(patch.Height / MapRange), 0));
+            element.SetCanvasRelativeSize(new Vector3(width, height, 0));
             element.SetCanvasPinOrigin(new Vector3(0.5f, 0.5f, 0));
             _mapCanvas!.Children.Add(element);
         }
@@ -551,6 +758,46 @@ public sealed class WairOfDotsGame : Game
         legend.SetCanvasRelativePosition(new Vector3(0.015f, 0.02f, 0));
         legend.SetCanvasRelativeSize(new Vector3(0.62f, 0.05f, 0));
         _mapCanvas!.Children.Add(legend);
+    }
+
+    private void AddTerritoryBoundaries(MatchSnapshot snapshot)
+    {
+        var index = 0;
+        foreach (var segment in snapshot.TerritoryBoundaries)
+            AddTerritoryBoundary(segment, index++, BoundaryColor(segment.OwnerId), TerritoryBoundaryThickness, "TerritoryBoundary");
+    }
+
+    private void AddTerritoryBoundary(
+        TerritoryBoundarySegment segment,
+        int index,
+        Color color,
+        float thickness,
+        string namePrefix)
+    {
+        var isVertical = segment.FromX == segment.ToX;
+        var startX = segment.FromX / (float)_simulation.Grid.Width;
+        var startY = segment.FromY / (float)_simulation.Grid.Height;
+        var endX = segment.ToX / (float)_simulation.Grid.Width;
+        var endY = segment.ToY / (float)_simulation.Grid.Height;
+        var centerX = (startX + endX) / 2f;
+        var centerY = (startY + endY) / 2f;
+        var width = isVertical ? thickness : Math.Max(0.001f, Math.Abs(endX - startX));
+        var height = isVertical ? Math.Max(0.001f, Math.Abs(endY - startY)) : thickness;
+
+        var boundary = new StackPanel
+        {
+            Name = $"{namePrefix}_{index}_{segment.OwnerId}_{segment.NeighborOwnerId}",
+            BackgroundColor = color,
+            MinimumWidth = Math.Max(1f, width * MapCanvasWidth),
+            MaximumWidth = Math.Max(1f, width * MapCanvasWidth),
+            MinimumHeight = Math.Max(1f, height * MapCanvasHeight),
+            MaximumHeight = Math.Max(1f, height * MapCanvasHeight)
+        };
+
+        boundary.SetCanvasRelativePosition(new Vector3(centerX, centerY, 0));
+        boundary.SetCanvasRelativeSize(new Vector3(width, height, 0));
+        boundary.SetCanvasPinOrigin(new Vector3(0.5f, 0.5f, 0));
+        _mapCanvas!.Children.Add(boundary);
     }
 
     private void AddEdges()
@@ -581,31 +828,33 @@ public sealed class WairOfDotsGame : Game
         foreach (var city in _simulation.Cities)
         {
             var citySnapshot = snapshot.Cities.First(c => c.Id == city.Id);
+            var isSelected = snapshot.HasHumanPlayer
+                ? city.Id == snapshot.HumanTargetCityId
+                : city.Id == _selectedTargetCityId;
             var rel = ToMapRelative(city.Position);
+            var fill = new TextBlock
+            {
+                Name = $"MapCityFill_{city.Id}",
+                Text = "■",
+                Font = _font,
+                TextSize = isSelected
+                    ? 34
+                    : citySnapshot.TotalUnits > 0 ? 31 : 29,
+                TextColor = PlayerColor(citySnapshot.OwnerId),
+                Margin = new Thickness(0, 0, 0, 0)
+            };
+
             var button = new Button
             {
                 Name = $"MapCity_{city.Id}",
-                Content = new TextBlock
-                {
-                    Text = "◆",
-                    Font = _font,
-                    TextSize = citySnapshot.TotalUnits > 0
-                        ? 34
-                        : citySnapshot.OwnerId == GameConstants.NeutralPlayerId ? 26 : 30,
-                    TextColor = PlayerColor(citySnapshot.OwnerId)
-                },
+                Content = fill,
                 Padding = new Thickness(0, 0, 0, 0)
             };
             button.Click += (_, _) => SelectTargetCity(city.Id);
-            button.SetCanvasRelativePosition(new Vector3(rel.X, rel.Y, 0));
-            button.SetCanvasRelativeSize(new Vector3(0.04f, 0.055f, 0));
+            button.SetCanvasRelativePosition(new Vector3(rel.X, rel.Y - 0.023f, 0));
+            button.SetCanvasRelativeSize(new Vector3(0.075f, 0.075f, 0));
             button.SetCanvasPinOrigin(new Vector3(0.5f, 0.5f, 0));
             _mapCanvas!.Children.Add(button);
-
-            var label = Text($"MapCityLabel_{city.Id}", city.Id.ToString(), 11, Color.White);
-            label.SetCanvasRelativePosition(new Vector3(rel.X + 0.018f, rel.Y + 0.028f, 0));
-            label.SetCanvasRelativeSize(new Vector3(0.035f, 0.03f, 0));
-            _mapCanvas.Children.Add(label);
         }
     }
 
@@ -654,7 +903,8 @@ public sealed class WairOfDotsGame : Game
                     Math.Round(visual.X, 4),
                     Math.Round(visual.Y, 4),
                     Math.Round(progress, 4),
-                    unit.VisualMoveTick == _simulation.Tick && unit.HasVisualMovement);
+                    unit.VisualMoveTick == _simulation.Tick && unit.HasVisualMovement,
+                    unit.IsUsingSmoothedSegment);
             })
             .ToList();
 
@@ -724,6 +974,13 @@ public sealed class WairOfDotsGame : Game
             _ => Color.LightPink
         };
 
+    private static Color BoundaryColor(int playerId)
+    {
+        var color = PlayerColor(playerId);
+        return new Color(color.R, color.G, color.B, playerId == GameConstants.NeutralPlayerId ? (byte)190 : byte.MaxValue);
+    }
+
+    private const float TerritoryBoundaryThickness = 0.004f;
     private const float MapMin = -9.2f;
     private const float MapMax = 9.2f;
     private const float MapRange = MapMax - MapMin;
@@ -747,6 +1004,8 @@ public sealed class WairOfDotsGame : Game
         lock (_stateLock)
         {
             _simulation = GameSimulation.Create(new GameSettings(ParseInt(_seedInput?.Text, 1337), ParseInt(_aiCountInput?.Text, 4)));
+            _lastSnapshot = null;
+            _mapHitTargetsReady = false;
             _menuPanel?.SetVisible(true);
             _hudPanel?.SetVisible(false);
             _settingsPanel?.SetVisible(false);
@@ -786,6 +1045,17 @@ public sealed class WairOfDotsGame : Game
             Margin = new Thickness(0, 3, 0, 3)
         };
 
+    private TextBlock CompactText(string name, string text, float size, Color color)
+        => new()
+        {
+            Name = name,
+            Text = text,
+            Font = _font,
+            TextSize = size,
+            TextColor = color,
+            Margin = new Thickness(0, 0, 0, 0)
+        };
+
     private UIElement CreateHumanToggleRow()
     {
         _humanToggleText = new TextBlock { Text = "Yes", Font = _font, TextColor = Color.White };
@@ -800,6 +1070,22 @@ public sealed class WairOfDotsGame : Game
         _humanPlayerToggle.Click += (_, _) => RefreshHumanToggleText();
 
         return LabeledRow("Human", _humanPlayerToggle);
+    }
+
+    private UIElement CreateHumanRoleRow()
+    {
+        _humanRoleText = new TextBlock { Text = "General", Font = _font, TextColor = Color.White };
+        _humanRoleToggle = new ToggleButton
+        {
+            Name = "HumanRoleButton",
+            Content = _humanRoleText,
+            State = ToggleState.UnChecked,
+            Padding = new Thickness(10, 5, 10, 5),
+            Margin = new Thickness(0, 4, 0, 4)
+        };
+        _humanRoleToggle.Click += (_, _) => CycleHumanRole();
+
+        return LabeledRow("Role", _humanRoleToggle);
     }
 
     private EditText Edit(string name, string text)
@@ -856,8 +1142,17 @@ public sealed class WairOfDotsGame : Game
     private static int ParseInt(string? value, int fallback)
         => int.TryParse(value, out var parsed) ? parsed : fallback;
 
+    private static double NormalizeSimulationSpeed(double speed)
+        => Math.Clamp(speed, MinimumSimulationSpeed, FastSimulationSpeed);
+
+    private static string FormatSimulationSpeed(double speed)
+        => $"{speed:0.##}x";
+
     private GameMode ResolveModeFromMenu()
         => _humanPlayerToggle?.State == ToggleState.UnChecked ? GameMode.AiOnly : GameMode.HumanVsAi;
+
+    private HumanControlMode ResolveHumanControlModeFromMenu()
+        => _selectedHumanControlMode;
 
     private void SetHumanToggle(bool hasHuman)
     {
@@ -873,6 +1168,44 @@ public sealed class WairOfDotsGame : Game
             _humanToggleText.Text = _humanPlayerToggle?.State == ToggleState.UnChecked ? "No" : "Yes";
     }
 
+    private void SetHumanRoleToggle(HumanControlMode mode)
+    {
+        _selectedHumanControlMode = mode;
+        if (_humanRoleToggle != null)
+            _humanRoleToggle.State = mode == HumanControlMode.General ? ToggleState.UnChecked : ToggleState.Checked;
+
+        RefreshHumanRoleText();
+    }
+
+    private void RefreshHumanRoleText()
+    {
+        if (_humanRoleText != null)
+            _humanRoleText.Text = HumanRoleLabel(_selectedHumanControlMode);
+    }
+
+    private void CycleHumanRole()
+    {
+        var modes = new[]
+        {
+            HumanControlMode.General,
+            HumanControlMode.Commander,
+            HumanControlMode.GeneralAndCommander,
+            HumanControlMode.DotChaos
+        };
+        var currentIndex = Array.IndexOf(modes, _selectedHumanControlMode);
+        SetHumanRoleToggle(modes[(currentIndex + 1 + modes.Length) % modes.Length]);
+        if (_simulation.HasHumanPlayer)
+            _simulation.ApplyHumanCommand(new HumanCommand(ControlMode: _selectedHumanControlMode));
+    }
+
+    private static string HumanRoleLabel(HumanControlMode mode)
+        => mode switch
+        {
+            HumanControlMode.GeneralAndCommander => "General+Commander",
+            HumanControlMode.DotChaos => "Dot Chaos",
+            _ => mode.ToString()
+        };
+
     private static string OwnerLabel(int ownerId, bool hasHumanPlayer)
         => ownerId switch
         {
@@ -880,6 +1213,26 @@ public sealed class WairOfDotsGame : Game
             GameConstants.HumanPlayerId when hasHumanPlayer => "Human",
             _ => $"AI {ownerId}"
         };
+
+    private static string FormatAiStateSummary(MatchSnapshot snapshot)
+    {
+        var states = snapshot.Players
+            .Where(player => player.Kind == PlayerKind.Ai.ToString() && !player.IsEliminated)
+            .OrderBy(player => player.Id)
+            .Select(player => $"{player.Id}:{ShortArchetype(player.AiArchetype)}/{ShortDirective(player.Directive)}");
+
+        return $"AI states {string.Join(" ", states)}";
+    }
+
+    private static string ShortArchetype(string archetype)
+        => archetype switch
+        {
+            "opportunist" => "opp",
+            _ => archetype
+        };
+
+    private static string ShortDirective(string directive)
+        => string.IsNullOrWhiteSpace(directive) ? "?" : directive[..1];
 
     private static string ResolvePipeName()
     {

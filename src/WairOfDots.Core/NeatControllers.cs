@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace WairOfDots.Core;
 
 public sealed record CityObservation(
@@ -18,7 +20,15 @@ public sealed record AiObservation(
     double CommanderHealth,
     double GeneralHealth,
     double TimePressure,
-    IReadOnlyList<CityObservation> Cities);
+    IReadOnlyList<CityObservation> Cities,
+    double ControlledCellRatio = 0,
+    double TaxIncome = 0,
+    double Treasury = 0,
+    double Upkeep = 0,
+    double PayrollDeficit = 0,
+    double SpawnCapacity = 0,
+    double EconomyRisk = 0,
+    double GeneralSecurity = 1);
 
 public sealed record AiDecision(
     PlayerDirective Directive,
@@ -26,6 +36,14 @@ public sealed record AiDecision(
     double LightPreference,
     double Aggression,
     string DebugLabel);
+
+public sealed record GenomeDescriptor(
+    string GenomeId,
+    string Archetype,
+    double[] Weights,
+    double TargetEnemyBias,
+    double TargetNeutralBias,
+    double DistanceBias);
 
 public interface IAiController
 {
@@ -59,6 +77,33 @@ public sealed class GenomeNeatController : IAiController
 
     public string GenomeId { get; }
 
+    public GenomeDescriptor ToDescriptor()
+        => new(GenomeId, _archetype, _weights.ToArray(), _targetEnemyBias, _targetNeutralBias, _distanceBias);
+
+    public string ToJson()
+        => JsonSerializer.Serialize(ToDescriptor(), new JsonSerializerOptions { WriteIndented = true });
+
+    public static GenomeNeatController FromJson(string json)
+    {
+        var descriptor = JsonSerializer.Deserialize<GenomeDescriptor>(json)
+            ?? throw new ArgumentException("Genome JSON did not contain a descriptor.", nameof(json));
+        return FromDescriptor(descriptor);
+    }
+
+    public static GenomeNeatController FromDescriptor(GenomeDescriptor descriptor)
+    {
+        if (descriptor.Weights.Length < 10)
+            throw new ArgumentException("Genome descriptor must contain at least 10 weights.", nameof(descriptor));
+
+        return new GenomeNeatController(
+            descriptor.GenomeId,
+            descriptor.Archetype,
+            descriptor.Weights.ToArray(),
+            descriptor.TargetEnemyBias,
+            descriptor.TargetNeutralBias,
+            descriptor.DistanceBias);
+    }
+
     public static GenomeNeatController Create(int seed, int playerId)
     {
         var archetypes = new[] { "rush", "turtle", "opportunist", "decap" };
@@ -79,6 +124,17 @@ public sealed class GenomeNeatController : IAiController
         return new GenomeNeatController($"neat-{archetype}-{seed}-{playerId}", archetype, weights, enemy, neutral, distance);
     }
 
+    public static string ResolveArchetype(string genomeId)
+    {
+        const string prefix = "neat-";
+        if (!genomeId.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            return genomeId;
+
+        var remaining = genomeId[prefix.Length..];
+        var separator = remaining.IndexOf('-', StringComparison.Ordinal);
+        return separator <= 0 ? remaining : remaining[..separator];
+    }
+
     public AiDecision Decide(AiObservation observation)
     {
         var aggressionRaw =
@@ -86,12 +142,17 @@ public sealed class GenomeNeatController : IAiController
             observation.ResourceLevel * _weights[1] +
             observation.CommanderHealth * _weights[2] +
             observation.GeneralHealth * _weights[3] +
-            observation.TimePressure * _weights[4];
+            observation.TimePressure * _weights[4] +
+            observation.ControlledCellRatio * 0.20 -
+            observation.EconomyRisk * 0.35 +
+            observation.PayrollDeficit * -0.20 +
+            observation.GeneralSecurity * 0.10;
 
         var aggression = Sigmoid(aggressionRaw + (_archetype == "rush" ? 0.35 : 0));
         var lightPreference = Math.Clamp(Sigmoid(_weights[5] + aggression - observation.StrengthRatio * 0.15), 0.25, 0.9);
         var directive = aggression switch
         {
+            _ when observation.EconomyRisk > 0.82 => PlayerDirective.Defend,
             < 0.35 => PlayerDirective.Defend,
             < 0.58 => PlayerDirective.Hold,
             _ => PlayerDirective.Attack

@@ -1,6 +1,6 @@
 # Any-Angle Path Smoothing Roadmap
 
-Status: proposed.
+Status: implemented and verified.
 
 ## Goal
 
@@ -38,53 +38,53 @@ Eight-way movement is a strong improvement over cardinal-only movement, but unit
 
 ## Slice 1: Path Smoothing Model
 
-- [ ] Add a deterministic line-of-sight helper over grid cells.
-- [ ] Add a path-smoothing pass that removes unnecessary intermediate cells.
-- [ ] Keep the original grid path available for occupancy and movement reservation.
-- [ ] Represent smoothed waypoints separately from authoritative grid cells.
-- [ ] Ensure smoothing never crosses water, blocked cells, occupied cells, or reserved cells.
+- [x] Add a deterministic line-of-sight helper over grid cells.
+- [x] Add a path-smoothing pass that removes unnecessary intermediate cells.
+- [x] Keep the original grid path available for occupancy and movement reservation.
+- [x] Represent smoothed waypoints separately from authoritative grid cells.
+- [x] Ensure smoothing never crosses water, blocked cells, occupied cells, or reserved cells.
 
 ## Slice 2: Movement Integration
 
-- [ ] Keep each simulation step moving through legal grid cells.
-- [ ] Use smoothed waypoints for visual interpolation where the grid sequence is clear.
-- [ ] Update visual state to support longer segments than one cell center.
-- [ ] Preserve deterministic step timing from terrain and unit speed.
-- [ ] Reset smoothed visual movement when paths are blocked, combat starts, units die, or orders change.
+- [x] Keep each simulation step moving through legal grid cells.
+- [x] Use smoothed waypoints for visual interpolation where the grid sequence is clear.
+- [x] Update visual state to support longer segments than one cell center.
+- [x] Preserve deterministic step timing from terrain and unit speed.
+- [x] Reset smoothed visual movement when paths are blocked, combat starts, units die, or orders change.
 
 ## Slice 3: Tactical Rules
 
-- [ ] Keep one unit per authoritative cell.
-- [ ] Keep city capture on the city grid cell.
-- [ ] Keep combat based on authoritative grid adjacency or tactical range.
-- [ ] Ensure units do not visually pass through enemy or friendly occupied cells.
-- [ ] Keep AI observation and fitness based on tactical cells, not visual-only positions.
+- [x] Keep one unit per authoritative cell.
+- [x] Keep city capture on the city grid cell.
+- [x] Keep combat based on authoritative grid adjacency or tactical range.
+- [x] Ensure units do not visually pass through enemy or friendly occupied cells.
+- [x] Keep AI observation and fitness based on tactical cells, not visual-only positions.
 
 ## Slice 4: Rendering And Diagnostics
 
-- [ ] Update unit visual diagnostics to report smoothed segment start, end, and progress.
-- [ ] Keep current cell and next authoritative cell visible in Brinell diagnostics.
-- [ ] Add a diagnostic flag that indicates whether a unit is using a smoothed multi-cell segment.
+- [x] Update unit visual diagnostics to report smoothed segment start, end, and progress.
+- [x] Keep current cell and next authoritative cell visible in Brinell diagnostics.
+- [x] Add a diagnostic flag that indicates whether a unit is using a smoothed multi-cell segment.
 - [ ] Confirm map markers glide cleanly on non-8-way angles.
-- [ ] Keep screenshots useful as smoke checks, but use map-state diagnostics for assertions.
+- [x] Keep screenshots useful as smoke checks, but use map-state diagnostics for assertions.
 
 ## Slice 5: Test Coverage
 
-- [ ] Unit test: line-of-sight passes through clear cells.
-- [ ] Unit test: line-of-sight fails on water or blocked terrain.
-- [ ] Unit test: path smoothing removes intermediate cells on open terrain.
-- [ ] Unit test: path smoothing preserves cells around obstacles and occupied cells.
-- [ ] Unit test: authoritative occupancy remains single-cell and deterministic.
-- [ ] Brinell gameplay test: a unit reports a smoothed visual segment whose delta is not cardinal or diagonal.
-- [ ] Brinell smoke test: smoothing keeps duplicate occupied cells at `0`.
-- [ ] Run build, unit tests, and Brinell UI tests.
+- [x] Unit test: line-of-sight passes through clear cells.
+- [x] Unit test: line-of-sight fails on water or blocked terrain.
+- [x] Unit test: path smoothing removes intermediate cells on open terrain.
+- [x] Unit test: path smoothing preserves cells around obstacles and occupied cells.
+- [x] Unit test: authoritative occupancy remains single-cell and deterministic.
+- [x] Brinell gameplay test: a unit reports a smoothed visual segment whose delta is not cardinal or diagonal.
+- [x] Brinell smoke test: smoothing keeps duplicate occupied cells at `0`.
+- [x] Run build, unit tests, and Brinell UI tests.
 
 ## Slice 6: Docs
 
-- [ ] Update `.my/HowToPlay.md` to describe natural-looking movement while clarifying grid-based tactics.
-- [ ] Update `.my/UAT.md` with any-angle movement visual checks.
-- [ ] Update `.my/DevPrompts/Architecture.md` to document grid authority plus smoothed visual waypoints.
-- [ ] Mark this roadmap complete after implementation and verification.
+- [x] Update `.my/HowToPlay.md` to describe natural-looking movement while clarifying grid-based tactics.
+- [x] Update `.my/UAT.md` with any-angle movement visual checks.
+- [x] Update `.my/DevPrompts/Architecture.md` to document grid authority plus smoothed visual waypoints.
+- [x] Mark this roadmap complete after implementation and verification.
 
 ## Open Questions
 

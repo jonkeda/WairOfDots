@@ -134,17 +134,38 @@ public class SimulationTests
     }
 
     [Fact]
-    public void AiOnly_AdvancesCapturesCitiesAndEnds()
+    public void AiOnly_AdvancesAndEndsWithConsistentCityOwnership()
     {
         var simulation = GameSimulation.Create(new GameSettings(Seed: 12, AiPlayers: 4, MatchLengthTicks: 120, Mode: GameMode.AiOnly));
         simulation.Start();
 
         simulation.Step(130);
+        var eliminatedPlayerIds = simulation.Players
+            .Where(player => player.IsEliminated)
+            .Select(player => player.Id)
+            .ToHashSet();
 
         Assert.True(simulation.Tick > 0);
-        Assert.True(simulation.Cities.Count(city => city.OwnerId != GameConstants.NeutralPlayerId) > simulation.Players.Count);
+        Assert.DoesNotContain(simulation.Cities, city => eliminatedPlayerIds.Contains(city.OwnerId));
         Assert.Equal(MatchPhase.Ended, simulation.Phase);
         Assert.NotNull(simulation.WinnerId);
+    }
+
+    [Fact]
+    public void Snapshot_EndsRunningMatchWhenOnlyOnePlayerRemains()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 12, AiPlayers: 4, Mode: GameMode.AiOnly));
+        simulation.Start();
+
+        foreach (var general in simulation.Units.Where(unit => unit.PlayerId != 0 && unit.Kind == UnitKind.General))
+            general.Health = 0;
+
+        var snapshot = simulation.CreateSnapshot();
+
+        Assert.Equal(MatchPhase.Ended, simulation.Phase);
+        Assert.Equal("Ended", snapshot.Phase);
+        Assert.Equal(0, snapshot.WinnerId);
+        Assert.Single(snapshot.Players, player => !player.IsEliminated);
     }
 
     [Fact]
@@ -173,6 +194,28 @@ public class SimulationTests
         var aiPlayers = simulation.Players.Where(player => player.Kind == PlayerKind.Ai).ToList();
         Assert.Equal(4, aiPlayers.Select(player => player.GenomeId).Distinct().Count());
         Assert.NotEmpty(simulation.Telemetry);
+    }
+
+    [Fact]
+    public void AiHoldDecay_ForcesAttackAfterRepeatedQuietHolds()
+    {
+        var first = GameSimulation.ResolveHoldDecay(PlayerDirective.Hold, previousConsecutiveHoldPlans: 0, hasNearbyEnemyPressure: false);
+        var second = GameSimulation.ResolveHoldDecay(PlayerDirective.Hold, first.ConsecutiveHoldPlans, hasNearbyEnemyPressure: false);
+        var third = GameSimulation.ResolveHoldDecay(PlayerDirective.Hold, second.ConsecutiveHoldPlans, hasNearbyEnemyPressure: false);
+        var pressured = GameSimulation.ResolveHoldDecay(PlayerDirective.Hold, previousConsecutiveHoldPlans: 2, hasNearbyEnemyPressure: true);
+        var attack = GameSimulation.ResolveHoldDecay(PlayerDirective.Attack, previousConsecutiveHoldPlans: 2, hasNearbyEnemyPressure: false);
+
+        Assert.Equal(PlayerDirective.Hold, first.Directive);
+        Assert.Equal(1, first.ConsecutiveHoldPlans);
+        Assert.Equal(PlayerDirective.Hold, second.Directive);
+        Assert.Equal(2, second.ConsecutiveHoldPlans);
+        Assert.Equal(PlayerDirective.Attack, third.Directive);
+        Assert.True(third.Decayed);
+        Assert.Equal(0, third.ConsecutiveHoldPlans);
+        Assert.Equal(PlayerDirective.Hold, pressured.Directive);
+        Assert.Equal(3, pressured.ConsecutiveHoldPlans);
+        Assert.Equal(PlayerDirective.Attack, attack.Directive);
+        Assert.Equal(0, attack.ConsecutiveHoldPlans);
     }
 
     [Fact]
@@ -571,6 +614,63 @@ public class SimulationTests
     }
 
     [Fact]
+    public void RoutedUnit_DoesNotAttackAdjacentEnemy()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
+        var attacker = simulation.Units.First(unit => unit.PlayerId == 0 && unit.Kind == UnitKind.Infantry);
+        var defender = simulation.Units.First(unit => unit.PlayerId == 1 && unit.Kind == UnitKind.Infantry);
+        DisableOtherUnits(simulation, attacker, defender);
+        var pair = FindAdjacentPair(simulation, attacker, defender);
+        PlaceUnit(simulation, attacker, pair.Attacker);
+        PlaceUnit(simulation, defender, pair.Defender);
+        attacker.Morale = MoraleRules.RoutThreshold / 2;
+        var defenderHealth = defender.Health;
+        simulation.Start();
+
+        simulation.Step(1);
+
+        Assert.Equal(defenderHealth, defender.Health);
+        Assert.Contains(simulation.Telemetry, item => item.EventType == "RoutedUnitHeld");
+    }
+
+    [Fact]
+    public void RoutedUnit_CanRallyNearGeneralAndFriendlyCity()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
+        var unit = simulation.Units.First(unit => unit.PlayerId == 0 && unit.Kind == UnitKind.Infantry);
+        unit.Morale = MoraleRules.RoutThreshold - 0.004;
+        simulation.Start();
+
+        simulation.Step(1);
+
+        Assert.NotEqual(MoraleBand.Routed, MoraleRules.Band(unit.Morale));
+        Assert.Contains(simulation.Telemetry, item => item.EventType == "Rally" && item.PlayerId == unit.PlayerId);
+    }
+
+    [Fact]
+    public void CommanderUnderAttack_DropsNearbyFriendlyMoraleAndEmitsTelemetry()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
+        var attacker = simulation.Units.First(unit => unit.PlayerId == 0 && unit.Kind == UnitKind.Infantry);
+        var commander = simulation.Units.First(unit => unit.PlayerId == 1 && unit.Kind == UnitKind.Commander);
+        var nearbyAlly = simulation.Units.First(unit => unit.PlayerId == 1 && unit.Kind == UnitKind.Infantry);
+        DisableOtherUnits(simulation, attacker, commander, nearbyAlly);
+        var pair = FindAdjacentPair(simulation, attacker, commander);
+        PlaceUnit(simulation, attacker, pair.Attacker);
+        PlaceUnit(simulation, commander, pair.Defender);
+        var allyCell = AdjacentCells(pair.Defender)
+            .First(point => simulation.Grid.IsPassable(point) && point != pair.Attacker);
+        PlaceUnit(simulation, nearbyAlly, allyCell);
+        var morale = nearbyAlly.Morale;
+        simulation.Start();
+
+        simulation.Step(1);
+
+        Assert.True(nearbyAlly.Morale < morale);
+        Assert.Contains(simulation.Telemetry, item => item.EventType == "CommanderPressure");
+    }
+
+    [Fact]
     public void DiagonalEnemyUnits_AttackEachOther()
     {
         var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
@@ -676,13 +776,70 @@ public class SimulationTests
     }
 
     [Fact]
+    public void GeneralDefeat_NeutralizesOwnedCitiesAndAllowsRecapture()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
+        var attacker = simulation.Units.First(unit => unit.PlayerId == 0 && unit.Kind == UnitKind.Tank);
+        var defender = simulation.Units.First(unit => unit.PlayerId == 1 && unit.Kind == UnitKind.General);
+        var extraCity = simulation.Cities.First(city =>
+            city.OwnerId == GameConstants.NeutralPlayerId &&
+            simulation.Units.All(unit => unit.Cell != city.GridPosition));
+        extraCity.OwnerId = defender.PlayerId;
+        var defeatedCityIds = simulation.Cities
+            .Where(city => city.OwnerId == defender.PlayerId)
+            .Select(city => city.Id)
+            .ToList();
+        var otherPlayerHome = simulation.Cities[simulation.Players[2].HomeCityId];
+        var pair = FindAdjacentPair(simulation, attacker, defender);
+        PlaceUnit(simulation, attacker, pair.Attacker);
+        PlaceUnit(simulation, defender, pair.Defender);
+        defender.Health = 0.25;
+        simulation.Start();
+
+        simulation.Step(1);
+
+        Assert.True(simulation.Players[1].IsEliminated);
+        Assert.All(defeatedCityIds, cityId => Assert.Equal(GameConstants.NeutralPlayerId, simulation.Cities[cityId].OwnerId));
+        Assert.Equal(2, otherPlayerHome.OwnerId);
+        var defeatedStanding = simulation.CreateSnapshot().Standings.Single(standing => standing.PlayerId == 1);
+        Assert.Equal(0, defeatedStanding.CityCount);
+        Assert.True(defeatedStanding.Score < 0);
+
+        PlaceUnit(simulation, attacker, extraCity.GridPosition);
+        simulation.Step(1);
+
+        Assert.Equal(attacker.PlayerId, extraCity.OwnerId);
+    }
+
+    [Fact]
+    public void MissingGeneral_NeutralizesOwnedCitiesDuringLeaderHealthRefresh()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
+        var general = simulation.Units.First(unit => unit.PlayerId == 1 && unit.Kind == UnitKind.General);
+        var extraCity = simulation.Cities.First(city => city.OwnerId == GameConstants.NeutralPlayerId);
+        extraCity.OwnerId = general.PlayerId;
+        var defeatedCityIds = simulation.Cities
+            .Where(city => city.OwnerId == general.PlayerId)
+            .Select(city => city.Id)
+            .ToList();
+        general.Health = 0;
+
+        var snapshot = simulation.CreateSnapshot();
+
+        Assert.True(snapshot.Players.Single(player => player.Id == 1).IsEliminated);
+        Assert.All(defeatedCityIds, cityId => Assert.Equal(GameConstants.NeutralPlayerId, simulation.Cities[cityId].OwnerId));
+        Assert.Equal(0, snapshot.Standings.Single(standing => standing.PlayerId == 1).CityCount);
+        Assert.True(snapshot.Standings.Single(standing => standing.PlayerId == 1).Score < 0);
+    }
+
+    [Fact]
     public void AttackCenter_CanCaptureANeutralCity()
     {
         var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
         simulation.ApplyHumanCommand(new HumanCommand(PlayerDirective.Attack, TargetCityId: 0));
         simulation.Start();
 
-        simulation.Step(80);
+        simulation.Step(160);
 
         Assert.NotEqual(GameConstants.NeutralPlayerId, simulation.Cities[0].OwnerId);
     }
@@ -912,11 +1069,20 @@ public class SimulationTests
         unit.Path = [];
         unit.PathIndex = 0;
         unit.StepProgress = 0;
+        unit.SmoothedPathIndices = [];
         unit.VisualFromCell = cell;
         unit.VisualToCell = cell;
         unit.VisualFromPosition = unit.CurrentPosition;
         unit.VisualToPosition = unit.CurrentPosition;
         unit.VisualMoveTick = -1;
+    }
+
+    private static MapPoint Interpolate(MapPoint from, MapPoint to, double progress)
+    {
+        var clamped = Math.Clamp(progress, 0, 1);
+        return new MapPoint(
+            from.X + (to.X - from.X) * clamped,
+            from.Y + (to.Y - from.Y) * clamped);
     }
 
     private static IEnumerable<GridPoint> AdjacentCells(GridPoint point)
@@ -942,5 +1108,280 @@ public class SimulationTests
     {
         yield return new GridPoint(from.X, to.Y);
         yield return new GridPoint(to.X, from.Y);
+    }
+
+    // ── Path Smoothing Tests ──────────────────────────────────────────
+
+    [Fact]
+    public void LineOfSight_PassesThroughClearCells()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
+        var start = FindPassableCell(simulation, 5, 5);
+        var end = FindPassableCellInDirection(simulation, start, 3, 0);
+
+        Assert.True(simulation.HasLineOfSight(start, end));
+    }
+
+    [Fact]
+    public void LineOfSight_FailsOnWaterOrBlockedTerrain()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
+        var waterCell = simulation.Grid.Cells.First(cell => cell.Terrain == TerrainKind.Water);
+        var before = FindPassableNeighbor(simulation, waterCell.Point, dx: -1, dy: 0);
+        var after = FindPassableNeighbor(simulation, waterCell.Point, dx: 1, dy: 0);
+
+        if (before.HasValue && after.HasValue)
+            Assert.False(simulation.HasLineOfSight(before.Value, after.Value));
+    }
+
+    [Fact]
+    public void LineOfSight_SameCell_ReturnsTrue()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
+        var cell = FindPassableCell(simulation, 5, 5);
+
+        Assert.True(simulation.HasLineOfSight(cell, cell));
+    }
+
+    [Fact]
+    public void SmoothGridPath_RemovesIntermediateCellsOnOpenTerrain()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
+        var openPath = FindOpenCardinalPath(simulation, minLength: 5);
+
+        var smoothed = simulation.SmoothGridPath(openPath);
+
+        Assert.True(smoothed.Count < openPath.Count,
+            $"Smoothed path ({smoothed.Count} waypoints) should have fewer waypoints than grid path ({openPath.Count} cells)");
+        Assert.Equal(0, smoothed[0]);
+        Assert.Equal(openPath.Count - 1, smoothed[^1]);
+    }
+
+    [Fact]
+    public void SmoothGridPath_PreservesCellsAroundObstacles()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
+        var mover = simulation.Units.First(unit => unit.PlayerId == 0 && unit.Kind == UnitKind.Infantry);
+        var general = simulation.Units.First(unit => unit.PlayerId == mover.PlayerId && unit.Kind == UnitKind.General);
+        DisableOtherUnits(simulation, mover, general);
+        simulation.ApplyHumanCommand(new HumanCommand(PlayerDirective.Attack, TargetCityId: 0));
+        simulation.Start();
+        simulation.Step(12);
+
+        if (!mover.IsMoving || mover.Path.Count < 3)
+            return;
+
+        var smoothed = simulation.SmoothGridPath(mover.Path);
+        Assert.True(smoothed.Count >= 2);
+        Assert.Equal(0, smoothed[0]);
+        Assert.Equal(mover.Path.Count - 1, smoothed[^1]);
+    }
+
+    [Fact]
+    public void SmoothGridPath_ShortPath_ReturnsAllIndices()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
+        var cell = FindPassableCell(simulation, 10, 10);
+        var neighbor = AdjacentCells(cell)
+            .First(p => simulation.Grid.IsPassable(p));
+        var path = new List<GridPoint> { cell, neighbor };
+
+        var smoothed = simulation.SmoothGridPath(path);
+
+        Assert.Equal([0, 1], smoothed);
+    }
+
+    [Fact]
+    public void Dispatch_LeavesVisualMovementBoundToGridSteps()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
+        simulation.ApplyHumanCommand(new HumanCommand(PlayerDirective.Attack, TargetCityId: 0));
+        simulation.Start();
+
+        simulation.Step(12);
+
+        var unit = simulation.Units.FirstOrDefault(unit =>
+            unit.PlayerId == GameConstants.HumanPlayerId &&
+            unit.IsMoving &&
+            unit.Path.Count >= 3);
+
+        if (unit == null)
+            return;
+
+        Assert.Empty(unit.SmoothedPathIndices);
+        Assert.False(unit.IsUsingSmoothedSegment);
+    }
+
+    [Fact]
+    public void VisualMovement_IgnoresLongSmoothedSegmentsAndStaysOnCurrentGridStep()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
+        var mover = simulation.Units.First(unit => unit.PlayerId == 0 && unit.Kind == UnitKind.Tank);
+        var general = simulation.Units.First(unit => unit.PlayerId == mover.PlayerId && unit.Kind == UnitKind.General);
+        DisableOtherUnits(simulation, mover, general);
+        var openPath = FindOpenCardinalPath(simulation, minLength: 4);
+        PlaceUnit(simulation, mover, openPath[0]);
+        mover.Path = openPath;
+        mover.SmoothedPathIndices = [0, openPath.Count - 1];
+        simulation.Start();
+
+        simulation.Step(1);
+
+        if (!mover.IsMoving)
+            return;
+
+        var current = simulation.Grid.ToMapPoint(mover.Cell);
+        var next = simulation.Grid.ToMapPoint(mover.Path[mover.PathIndex + 1]);
+        var expected = Interpolate(current, next, mover.StepProgress);
+
+        Assert.Equal(expected.X, mover.CurrentPosition.X, precision: 6);
+        Assert.Equal(expected.Y, mover.CurrentPosition.Y, precision: 6);
+    }
+
+    [Fact]
+    public void SmoothedMovement_KeepsSingleOccupancy()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
+        simulation.ApplyHumanCommand(new HumanCommand(PlayerDirective.Attack, TargetCityId: 0));
+        simulation.Start();
+
+        simulation.Step(24);
+
+        AssertNoDuplicateOccupiedCells(simulation);
+    }
+
+    [Fact]
+    public void SmoothedMovement_PreservesDeterminism()
+    {
+        var left = GameSimulation.Create(new GameSettings(Seed: 42));
+        var right = GameSimulation.Create(new GameSettings(Seed: 42));
+
+        left.Start();
+        right.Start();
+        left.Step(96);
+        right.Step(96);
+
+        Assert.Equal(left.CreateFingerprint(), right.CreateFingerprint());
+    }
+
+    [Fact]
+    public void BlockedPath_ClearsSmoothedPathIndices()
+    {
+        var simulation = GameSimulation.Create(new GameSettings(Seed: 5));
+        var mover = simulation.Units.First(unit => unit.PlayerId == 0 && unit.Kind == UnitKind.Infantry);
+        var blocker = simulation.Units.First(unit => unit.PlayerId == 0 && unit.Kind == UnitKind.Tank);
+        var general = simulation.Units.First(unit => unit.PlayerId == mover.PlayerId && unit.Kind == UnitKind.General);
+        DisableOtherUnits(simulation, mover, blocker, general);
+        var step = FindAdjacentPair(simulation, mover, blocker);
+        PlaceUnit(simulation, mover, step.Attacker);
+        PlaceUnit(simulation, blocker, step.Defender);
+        mover.Path = [step.Attacker, step.Defender];
+        mover.SmoothedPathIndices = [0, 1];
+        simulation.Start();
+
+        simulation.Step(1);
+
+        Assert.Empty(mover.SmoothedPathIndices);
+        Assert.False(mover.IsUsingSmoothedSegment);
+    }
+
+    // ── Path Smoothing Helpers ────────────────────────────────────────
+
+    private static GridPoint FindPassableCell(GameSimulation simulation, int startX, int startY)
+    {
+        for (var radius = 0; radius < simulation.Grid.Width; radius++)
+        {
+            for (var dx = -radius; dx <= radius; dx++)
+            {
+                for (var dy = -radius; dy <= radius; dy++)
+                {
+                    if (Math.Abs(dx) != radius && Math.Abs(dy) != radius)
+                        continue;
+                    var point = new GridPoint(startX + dx, startY + dy);
+                    if (simulation.Grid.Contains(point) && simulation.Grid.IsPassable(point))
+                        return point;
+                }
+            }
+        }
+
+        throw new InvalidOperationException("No passable cell found.");
+    }
+
+    private static GridPoint FindPassableCellInDirection(
+        GameSimulation simulation, GridPoint start, int dx, int dy)
+    {
+        var point = new GridPoint(start.X + dx, start.Y + dy);
+        while (simulation.Grid.Contains(point) && simulation.Grid.IsPassable(point))
+        {
+            var next = new GridPoint(point.X + Math.Sign(dx), point.Y + Math.Sign(dy));
+            if (!simulation.Grid.Contains(next) || !simulation.Grid.IsPassable(next))
+                break;
+            point = next;
+        }
+
+        return point;
+    }
+
+    private static GridPoint? FindPassableNeighbor(
+        GameSimulation simulation, GridPoint cell, int dx, int dy)
+    {
+        for (var distance = 1; distance <= 5; distance++)
+        {
+            var candidate = new GridPoint(cell.X + dx * distance, cell.Y + dy * distance);
+            if (simulation.Grid.Contains(candidate) && simulation.Grid.IsPassable(candidate))
+                return candidate;
+        }
+
+        return null;
+    }
+
+    private static List<GridPoint> FindOpenCardinalPath(
+        GameSimulation simulation, int minLength)
+    {
+        var occupied = simulation.Units
+            .Where(unit => unit.IsAlive)
+            .Select(unit => unit.Cell)
+            .ToHashSet();
+
+        foreach (var startCell in simulation.Grid.Cells
+                     .Where(cell => cell.IsPassable && !occupied.Contains(cell.Point))
+                     .OrderBy(cell => cell.Point.Y)
+                     .ThenBy(cell => cell.Point.X))
+        {
+            var path = new List<GridPoint> { startCell.Point };
+            var current = startCell.Point;
+
+            for (var step = 0; step < 10; step++)
+            {
+                GridPoint? best = null;
+                foreach (var next in new[]
+                         {
+                             new GridPoint(current.X + 1, current.Y),
+                             new GridPoint(current.X, current.Y + 1),
+                             new GridPoint(current.X + 1, current.Y + 1)
+                         })
+                {
+                    if (simulation.Grid.Contains(next) &&
+                        simulation.Grid.IsPassable(next) &&
+                        !occupied.Contains(next) &&
+                        !path.Contains(next))
+                    {
+                        best = next;
+                        break;
+                    }
+                }
+
+                if (!best.HasValue)
+                    break;
+
+                path.Add(best.Value);
+                current = best.Value;
+            }
+
+            if (path.Count >= minLength)
+                return path;
+        }
+
+        throw new InvalidOperationException($"No open path of length >= {minLength} found.");
     }
 }

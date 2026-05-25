@@ -23,6 +23,14 @@ public enum GameMode
     AiOnly
 }
 
+public enum HumanControlMode
+{
+    General,
+    Commander,
+    GeneralAndCommander,
+    DotChaos
+}
+
 public enum PlayerDirective
 {
     Attack,
@@ -48,11 +56,29 @@ public enum TerrainKind
     Forest
 }
 
+public enum MoraleBand
+{
+    Routed,
+    RoutRisk,
+    Cautious,
+    Normal,
+    Aggressive
+}
+
+public enum StrategyMode
+{
+    Advance,
+    Defend,
+    Rebuild,
+    ProtectGeneral
+}
+
 public sealed record GameSettings(
     int Seed = 1337,
     int AiPlayers = 4,
     int MatchLengthTicks = 1800,
-    GameMode Mode = GameMode.HumanVsAi)
+    GameMode Mode = GameMode.HumanVsAi,
+    HumanControlMode HumanControlMode = HumanControlMode.General)
 {
     public GameSettings Normalized()
         => this with
@@ -60,7 +86,8 @@ public sealed record GameSettings(
             AiPlayers = Mode == GameMode.AiOnly
                 ? Math.Clamp(AiPlayers, 2, 8)
                 : Math.Clamp(AiPlayers, 1, 8),
-            MatchLengthTicks = Math.Clamp(MatchLengthTicks, 120, 7200)
+            MatchLengthTicks = Math.Clamp(MatchLengthTicks, 120, 7200),
+            HumanControlMode = Mode == GameMode.AiOnly ? HumanControlMode.General : HumanControlMode
         };
 }
 
@@ -215,6 +242,24 @@ public sealed class PlayerState
     public int TargetCityId { get; set; }
     public double LightPreference { get; set; } = 0.65;
     public double Score { get; set; }
+    public double LastTaxIncome { get; set; }
+    public double LastUpkeep { get; set; }
+    public double LastPayrollDeficit { get; set; }
+    public double LastPayrollDeficitRatio { get; set; }
+    public int ControlledCellCount { get; set; }
+    public double ControlledTaxValue { get; set; }
+    public int SpawnCapacity { get; set; }
+    public double ReserveBudget { get; set; }
+    public double ReplenishmentRequest { get; set; }
+    public double EconomyRisk { get; set; }
+    public double GeneralSecurity { get; set; } = 1;
+    public int TargetRegionId { get; set; }
+    public int? GeneralRelocationCityId { get; set; }
+    public bool ScoutDirective { get; set; } = true;
+    public StrategyMode StrategyMode { get; set; } = StrategyMode.Advance;
+    public int CommanderLeaderlessUntilTick { get; set; }
+    public HumanControlMode HumanControlMode { get; set; } = HumanControlMode.General;
+    public int ConsecutiveHoldPlans { get; set; }
 }
 
 public sealed class TacticalUnit
@@ -224,6 +269,7 @@ public sealed class TacticalUnit
     public UnitKind Kind { get; init; }
     public GridPoint Cell { get; set; }
     public IReadOnlyList<GridPoint> Path { get; set; } = [];
+    public IReadOnlyList<int> SmoothedPathIndices { get; set; } = [];
     public int PathIndex { get; set; }
     public double StepProgress { get; set; }
     public MapPoint CurrentPosition { get; set; }
@@ -235,11 +281,15 @@ public sealed class TacticalUnit
     public double Health { get; set; }
     public double Morale { get; set; } = 1.0;
     public int? TargetCityId { get; set; }
+    public int? TargetRegionId { get; set; }
+    public bool IsProtectionDetail { get; set; }
+    public bool IsScout { get; set; }
 
     public bool IsAlive => Health > 0;
     public bool IsLeader => Kind is UnitKind.Commander or UnitKind.General;
     public int RemainingGridSteps => Math.Max(0, Path.Count - PathIndex - 1);
     public bool IsMoving => Path.Count > 1 && PathIndex < Path.Count - 1;
+    public bool IsUsingSmoothedSegment => SmoothedPathIndices.Count >= 2;
     public bool HasVisualMovement => VisualMoveTick >= 0 && VisualFromPosition.DistanceTo(VisualToPosition) > 0.0001;
 
     public double Speed
@@ -276,7 +326,11 @@ public sealed class TacticalUnit
 public sealed record HumanCommand(
     PlayerDirective? Directive = null,
     int? TargetCityId = null,
-    double? LightPreference = null);
+    double? LightPreference = null,
+    HumanControlMode? ControlMode = null,
+    int? TargetRegionId = null,
+    int? GeneralRelocationCityId = null,
+    bool? ScoutDirective = null);
 
 public sealed record TerrainPatch(
     int Id,
@@ -292,7 +346,61 @@ public sealed record TelemetryEvent(
     string GenomeId,
     string Observation,
     string Action,
-    double FitnessDelta);
+    double FitnessDelta,
+    string EventType = "AiPlan",
+    string Details = "");
+
+public sealed record CellControlSnapshot(
+    int X,
+    int Y,
+    int OwnerId,
+    double TaxValue,
+    string Terrain,
+    bool IsCityCell);
+
+public sealed record TerritoryBoundarySegment(
+    int FromX,
+    int FromY,
+    int ToX,
+    int ToY,
+    int OwnerId,
+    int NeighborOwnerId);
+
+public sealed record EconomySnapshot(
+    int PlayerId,
+    int ControlledCellCount,
+    double ControlledTaxValue,
+    double TaxIncome,
+    double Treasury,
+    double Upkeep,
+    double PayrollDeficit,
+    double PayrollDeficitRatio,
+    int SpawnCapacity,
+    double ReserveBudget,
+    double ReplenishmentRequest,
+    double EconomyRisk);
+
+public sealed record RegionSnapshot(
+    int RegionId,
+    int PlayerId,
+    int CommanderUnitId,
+    int AnchorCityId,
+    int ControlledCellCount,
+    double ControlledTaxValue,
+    int FriendlyUnitCount,
+    int EnemyUnitCount,
+    int OwnedCityCount,
+    int SpawnCapacity,
+    double PayrollPressure,
+    int LeaderlessTicksRemaining,
+    double Priority);
+
+public sealed record VisibilitySnapshot(
+    int PlayerId,
+    int VisibleCellCount,
+    int VisibleEnemyUnitCount,
+    bool EnemyGeneralVisible,
+    IReadOnlyList<int> VisibleEnemyUnitIds);
 
 public sealed record CitySnapshot(
     int Id,
@@ -314,7 +422,18 @@ public sealed record PlayerSnapshot(
     double CommanderHealth,
     double GeneralHealth,
     double Score,
-    string GenomeId);
+    string GenomeId,
+    string AiArchetype,
+    int ConsecutiveHoldPlans,
+    double TaxIncome,
+    double Upkeep,
+    double PayrollDeficit,
+    int ControlledCellCount,
+    double ControlledTaxValue,
+    int SpawnCapacity,
+    string StrategyMode,
+    int TargetRegionId,
+    string HumanControlMode);
 
 public sealed record UnitSnapshot(
     int Id,
@@ -323,9 +442,14 @@ public sealed record UnitSnapshot(
     int X,
     int Y,
     double Health,
+    double Morale,
+    string MoraleBand,
     bool IsLeader,
     int? TargetCityId,
-    int RemainingGridSteps);
+    int? TargetRegionId,
+    int RemainingGridSteps,
+    bool IsProtectionDetail,
+    bool IsScout);
 
 public sealed record StandingSnapshot(
     int PlayerId,
@@ -337,7 +461,12 @@ public sealed record StandingSnapshot(
     int UnitCount,
     double Resources,
     double GeneralHealth,
-    string GenomeId);
+    string GenomeId,
+    int ControlledCellCount,
+    double TaxIncome,
+    double Upkeep,
+    double PayrollDeficit,
+    int SpawnCapacity);
 
 public sealed record MatchSnapshot(
     int Tick,
@@ -355,7 +484,12 @@ public sealed record MatchSnapshot(
     IReadOnlyList<UnitSnapshot> Units,
     string GameMode,
     bool HasHumanPlayer,
-    IReadOnlyList<StandingSnapshot> Standings);
+    IReadOnlyList<StandingSnapshot> Standings,
+    IReadOnlyList<CellControlSnapshot> CellControls,
+    IReadOnlyList<TerritoryBoundarySegment> TerritoryBoundaries,
+    IReadOnlyList<EconomySnapshot> Economies,
+    IReadOnlyList<RegionSnapshot> Regions,
+    IReadOnlyList<VisibilitySnapshot> Visibility);
 
 public static class GameConstants
 {

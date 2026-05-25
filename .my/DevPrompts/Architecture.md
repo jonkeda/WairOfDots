@@ -17,6 +17,10 @@
 - Unit `Cell` is the authoritative position for occupancy, pathfinding, combat, capture, scoring, and fingerprints.
 - Unit visual movement is render-only: Stride interpolates circle markers between recorded map positions, and Brinell can query both the authoritative cell and visual position.
 - Movement pathfinding is eight-way. Diagonal steps cost `sqrt(2)` times the destination terrain cost and cannot cut through blocked, occupied, or reserved corners.
+- After A* finds a grid path, a line-of-sight smoothing pass removes unnecessary intermediate waypoints. Smoothed waypoints are stored separately from the authoritative grid path. Visual interpolation follows the smoothed line while the simulation still steps through grid cells.
+- City interaction is map-first: map city squares are clickable, colored by current owner, and do not show numeric labels or dark backing blocks. City list buttons are not part of the player HUD.
+- General death is an ownership boundary: when a player's General is gone, the player is eliminated and every city they controlled immediately becomes neutral.
+- AI-only standings are compact horizontal bar rows. The snapshot order is preserved without UI sorting. Metric labels live in a header row, each player row starts with a non-muted player-color dot, and each row exposes named Brinell elements for score, city, unit, and general-health bars.
 - Spectator speed changes how many fixed simulation ticks run per rendered tick; it does not make the simulation nondeterministic.
 - Brinell tests use Automation IDs and game queries, not manual inspection.
 - Oravey is a reference only for Stride/Brinell integration patterns. No Oravey mechanics or content are copied.

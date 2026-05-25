@@ -8,6 +8,7 @@ public sealed class MainMenuPage(IStrideTestContext context) : PageObjectBase<Ma
     public EditText<MainMenuPage> SeedInput => EditText("SeedInput");
     public EditText<MainMenuPage> AiCountInput => EditText("AiCountInput");
     public CheckBox<MainMenuPage> HumanPlayerCheckBox => CheckBox("HumanPlayerCheckBox");
+    public CheckBox<MainMenuPage> HumanRoleButton => CheckBox("HumanRoleButton");
     public Button<MainMenuPage> StartGameButton => Button("StartGameButton");
     public Button<MainMenuPage> SettingsButton => Button("SettingsButton");
 
