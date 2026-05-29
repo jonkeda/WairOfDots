@@ -150,7 +150,13 @@ public class EconomyStrategyTests
         var snapshot = simulation.CreateSnapshot();
         var fitness = FitnessEvaluator.Evaluate(snapshot, 0);
 
-        Assert.Equal(simulation.Players.Count, snapshot.Regions.Count);
+        Assert.Equal(simulation.Units.Count(unit => unit.Kind == UnitKind.Commander), snapshot.Regions.Count);
+        Assert.All(snapshot.Regions, region =>
+        {
+            Assert.True(region.Width > 0);
+            Assert.True(region.Height > 0);
+            Assert.True(region.AssignedCommanderUnitId.HasValue);
+        });
         Assert.Equal(simulation.Players.Count, snapshot.Visibility.Count);
         Assert.InRange(fitness.TotalFitness, 0, 1);
         Assert.Contains(simulation.Telemetry, item => item.EventType == "AiPlan");

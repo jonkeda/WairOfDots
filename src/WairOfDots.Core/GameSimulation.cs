@@ -9,9 +9,43 @@ public sealed class GameSimulation
     private const int PlanningInterval = 12;
     private const double InfantryCost = 2.0;
     private const double TankCost = 4.5;
+    private const double CommanderCost = 9.0;
+    private const double CommanderUpkeep = 0.9;
     private const double DiagonalMoveMultiplier = 1.4142135623730951;
     private const int TerritoryBoundaryMinimumComponentCells = 4;
     private const int MaxQuietHoldPlans = 2;
+    private const int RecentCombatVisualLifetimeTicks = 4;
+    private const int MaxRecentCombatHits = 96;
+    private const int MaxRecentDeaths = 24;
+    private const int MaxCommandRecordsPerPlayer = 32;
+    private const int MaxReportRecordsPerPlayer = 32;
+    private const string GeneralToCommanderLayer = "GeneralToCommander";
+    private const string GeneralToReserveLayer = "GeneralToReserve";
+    private const string CommanderToUnitLayer = "CommanderToUnit";
+    private const string AttackRegionCommand = "AttackRegion";
+    private const string HoldRegionCommand = "HoldRegion";
+    private const string CommanderToGeneralLayer = "CommanderToGeneral";
+    private const string UnitToCommanderLayer = "UnitToCommander";
+    private const string AssignReserveUnitCommand = "AssignReserveUnit";
+    private const string AssignReserveGroupCommand = "AssignReserveGroup";
+    private const string RecallCommanderUnitToReserveCommand = "RecallCommanderUnitToReserve";
+    private const string RecallCommanderGroupToReserveCommand = "RecallCommanderGroupToReserve";
+    private const string GeneralToCityLayer = "GeneralToCity";
+    private const string ProduceInfantryCommand = "ProduceInfantry";
+    private const string ProduceTankCommand = "ProduceTank";
+    private const string ProduceCommanderCommand = "ProduceCommander";
+    private const string HoldProductionCommand = "HoldProduction";
+    private const string AdvanceToCellCommand = "AdvanceToCell";
+    private const string DefendCellCommand = "DefendCell";
+    private const string EnemySightedReport = "EnemySighted";
+    private const string LowMoraleReport = "LowMorale";
+    private const string ReachedTargetReport = "ReachedTarget";
+    private const string RegionStableReport = "RegionStable";
+    private const string RegionContestedReport = "RegionContested";
+    private const string NeedReinforcementsReport = "NeedReinforcements";
+    private const string ReserveRecallRequestedReport = "ReserveRecallRequested";
+    private const string CommanderThreatenedReport = "CommanderThreatened";
+    private const string UnderAttackReport = "UnderAttack";
 
     private readonly List<CityNode> _cities;
     private readonly IReadOnlyList<TerrainPatch> _terrain;
@@ -23,7 +57,11 @@ public sealed class GameSimulation
     private readonly ICommanderController _commanderController = new DeterministicCommanderController();
     private readonly IUnitController _unitController = new DeterministicUnitController();
     private readonly Dictionary<GridPoint, CellControlState> _cellControls = [];
+    private readonly List<RecentCombatHit> _recentCombatHits = [];
     private readonly List<RecentUnitDeath> _recentDeaths = [];
+    private readonly List<CommandRecordSnapshot> _commandRecords = [];
+    private readonly List<ReportRecordSnapshot> _reportRecords = [];
+    private readonly Dictionary<int, List<CommanderRegionAssignment>> _explicitRegionAssignments = [];
     private readonly Dictionary<int, double> _previousControlledTax = [];
     private readonly Dictionary<int, int> _previousControlledCells = [];
     private readonly Dictionary<int, bool> _previousEnemyGeneralVisible = [];
@@ -31,6 +69,14 @@ public sealed class GameSimulation
     private int _nextUnitId = 1;
     private int _activeCombatCount;
     private string _lastEvent = "Waiting";
+
+    private sealed record CommanderObjective(
+        string CommandType,
+        GridPoint TargetCell,
+        int? TargetCityId,
+        int? TargetRegionId,
+        double Priority,
+        string ReasonCode);
 
     private GameSimulation(GameSettings settings, CreatedMap map)
     {
@@ -46,6 +92,7 @@ public sealed class GameSimulation
             home.OwnerId = player.Id;
             player.TargetCityId = 0;
             PlaceInitialArmy(player, home);
+            InitializeExplicitRegionAssignments(player);
 
             if (player.Kind == PlayerKind.Ai)
                 _generalControllers[player.Id] = new LegacyGeneralControllerAdapter(GenomeNeatController.Create(Settings.Seed, player.Id));
@@ -151,6 +198,245 @@ public sealed class GameSimulation
             human.ScoutDirective = command.ScoutDirective.Value;
 
         _lastEvent = $"Human set {human.Directive} on {_cities[human.TargetCityId].Name}";
+
+        if (command.Directive.HasValue || command.TargetCityId.HasValue || command.TargetRegionId.HasValue)
+            EmitGeneralRegionCommand(human);
+
+        if (command.AssignReserveUnitId.HasValue)
+        {
+            var commanderUnitId = command.AssignReserveCommanderUnitId ?? human.CommanderUnitId;
+            if (!commanderUnitId.HasValue ||
+                !TryAssignReserveUnitToCommander(human.Id, command.AssignReserveUnitId.Value, commanderUnitId.Value))
+            {
+                _lastEvent = "Reserve assignment failed";
+            }
+        }
+
+        if (command.AssignReserveGroupCommanderUnitId.HasValue || command.AssignReserveGroupSize.HasValue)
+        {
+            var commanderUnitId = command.AssignReserveGroupCommanderUnitId ?? human.CommanderUnitId;
+            var groupSize = Math.Max(1, command.AssignReserveGroupSize ?? 2);
+            if (!commanderUnitId.HasValue ||
+                !TryAssignReserveGroupToCommander(human.Id, commanderUnitId.Value, groupSize))
+            {
+                _lastEvent = "Reserve group assignment failed";
+            }
+        }
+
+        if (command.RecallCommanderUnitId.HasValue &&
+            !TryRecallCommanderUnitToReserve(human.Id, command.RecallCommanderUnitId.Value))
+        {
+            _lastEvent = "Reserve recall failed";
+        }
+
+        if (command.RecallCommanderGroupCommanderUnitId.HasValue || command.RecallCommanderGroupSize.HasValue)
+        {
+            var commanderUnitId = command.RecallCommanderGroupCommanderUnitId ?? human.CommanderUnitId;
+            var groupSize = Math.Max(1, command.RecallCommanderGroupSize ?? 2);
+            if (!commanderUnitId.HasValue ||
+                !TryRecallCommanderGroupToReserve(human.Id, commanderUnitId.Value, groupSize))
+            {
+                _lastEvent = "Reserve group recall failed";
+            }
+        }
+    }
+
+    public bool TryAssignReserveUnitToCommander(int playerId, int unitId, int commanderUnitId, string reasonCode = "manual")
+    {
+        var unit = _units.FirstOrDefault(unit => unit.Id == unitId);
+        var commander = _units.FirstOrDefault(unit => unit.Id == commanderUnitId);
+        if (playerId < 0 ||
+            playerId >= _players.Count ||
+            unit == null ||
+            commander == null ||
+            !UnitParticipates(unit) ||
+            !UnitParticipates(commander) ||
+            unit.PlayerId != playerId ||
+            commander.PlayerId != playerId ||
+            !CanAssignToCommander(unit) ||
+            unit.AssignedCommanderUnitId.HasValue ||
+            commander.Kind != UnitKind.Commander ||
+            !commander.CommanderNumber.HasValue)
+        {
+            return false;
+        }
+
+        AssignUnitToCommander(unit, commander);
+        AddCommandRecord(new CommandRecordSnapshot(
+            Tick,
+            playerId,
+            GeneralToReserveLayer,
+            _players[playerId].GeneralUnitId ?? commander.Id,
+            unit.Id,
+            commander.CommanderNumber,
+            AssignReserveUnitCommand,
+            null,
+            null,
+            null,
+            null,
+            1.0,
+            $"{reasonCode};commanderUnit={commander.Id}",
+            true));
+        _lastEvent = $"{_players[playerId].Name} assigned {unit.Kind} #{unit.Id} to Commander {commander.CommanderNumber.Value}";
+        return true;
+    }
+
+    public bool TryAssignReserveGroupToCommander(
+        int playerId,
+        int commanderUnitId,
+        int maxUnits,
+        string reasonCode = "manual")
+    {
+        var commander = _units.FirstOrDefault(unit => unit.Id == commanderUnitId);
+        if (playerId < 0 ||
+            playerId >= _players.Count ||
+            commander == null ||
+            !UnitParticipates(commander) ||
+            commander.PlayerId != playerId ||
+            commander.Kind != UnitKind.Commander ||
+            !commander.CommanderNumber.HasValue)
+        {
+            return false;
+        }
+
+        var units = _units
+            .Where(unit =>
+                UnitParticipates(unit) &&
+                unit.PlayerId == playerId &&
+                CanAssignToCommander(unit) &&
+                IsReserveUnit(unit))
+            .OrderBy(unit => unit.Cell.OctileDistanceTo(commander.Cell))
+            .ThenBy(unit => unit.Kind == UnitKind.Infantry ? 0 : 1)
+            .ThenBy(unit => unit.Id)
+            .Take(Math.Max(1, maxUnits))
+            .ToList();
+        if (units.Count == 0)
+            return false;
+
+        foreach (var unit in units)
+        {
+            AssignUnitToCommander(unit, commander);
+            AddCommandRecord(new CommandRecordSnapshot(
+                Tick,
+                playerId,
+                GeneralToReserveLayer,
+                _players[playerId].GeneralUnitId ?? commander.Id,
+                unit.Id,
+                commander.CommanderNumber,
+                AssignReserveGroupCommand,
+                commander.Cell.X,
+                commander.Cell.Y,
+                null,
+                commander.TargetRegionId,
+                0.9,
+                $"{reasonCode};commanderUnit={commander.Id};groupSize={units.Count}",
+                true));
+        }
+
+        _lastEvent = $"{_players[playerId].Name} assigned {units.Count} reserve units to Commander {commander.CommanderNumber.Value}";
+        return true;
+    }
+
+    public bool TryRecallCommanderUnitToReserve(int playerId, int unitId, string reasonCode = "general-recall")
+    {
+        var unit = _units.FirstOrDefault(unit => unit.Id == unitId);
+        if (playerId < 0 ||
+            playerId >= _players.Count ||
+            unit == null ||
+            !UnitParticipates(unit) ||
+            unit.PlayerId != playerId ||
+            !CanAssignToCommander(unit) ||
+            !unit.AssignedCommanderUnitId.HasValue)
+        {
+            return false;
+        }
+
+        var commanderNumber = unit.AssignedCommanderNumber;
+        unit.AssignedCommanderUnitId = null;
+        unit.AssignedCommanderNumber = null;
+        unit.IsProtectionDetail = false;
+        unit.IsScout = false;
+        ClearPath(unit, resetVisualState: true);
+
+        AddCommandRecord(new CommandRecordSnapshot(
+            Tick,
+            playerId,
+            GeneralToReserveLayer,
+            _players[playerId].GeneralUnitId ?? unit.Id,
+            unit.Id,
+            commanderNumber,
+            RecallCommanderUnitToReserveCommand,
+            unit.Cell.X,
+            unit.Cell.Y,
+            null,
+            null,
+            1.0,
+            reasonCode,
+            true));
+        _lastEvent = $"{_players[playerId].Name} recalled {unit.Kind} #{unit.Id} to reserve";
+        return true;
+    }
+
+    public bool TryRecallCommanderGroupToReserve(
+        int playerId,
+        int commanderUnitId,
+        int maxUnits,
+        string reasonCode = "manual-recall")
+    {
+        var commander = _units.FirstOrDefault(unit => unit.Id == commanderUnitId);
+        if (playerId < 0 ||
+            playerId >= _players.Count ||
+            commander == null ||
+            !UnitParticipates(commander) ||
+            commander.PlayerId != playerId ||
+            commander.Kind != UnitKind.Commander ||
+            !commander.CommanderNumber.HasValue)
+        {
+            return false;
+        }
+
+        var units = _units
+            .Where(unit =>
+                UnitParticipates(unit) &&
+                unit.PlayerId == playerId &&
+                CanAssignToCommander(unit) &&
+                unit.AssignedCommanderUnitId == commander.Id)
+            .OrderBy(unit => unit.Morale)
+            .ThenBy(unit => unit.Health / Math.Max(1.0, TacticalUnit.DefaultHealth(unit.Kind)))
+            .ThenByDescending(unit => unit.Cell.ChebyshevDistanceTo(commander.Cell))
+            .ThenBy(unit => unit.Id)
+            .Take(Math.Max(1, maxUnits))
+            .ToList();
+        if (units.Count == 0)
+            return false;
+
+        foreach (var unit in units)
+        {
+            unit.AssignedCommanderUnitId = null;
+            unit.AssignedCommanderNumber = null;
+            unit.IsProtectionDetail = false;
+            unit.IsScout = false;
+            ClearPath(unit, resetVisualState: true);
+
+            AddCommandRecord(new CommandRecordSnapshot(
+                Tick,
+                playerId,
+                GeneralToReserveLayer,
+                _players[playerId].GeneralUnitId ?? commander.Id,
+                unit.Id,
+                commander.CommanderNumber,
+                RecallCommanderGroupToReserveCommand,
+                unit.Cell.X,
+                unit.Cell.Y,
+                null,
+                commander.TargetRegionId,
+                0.95,
+                $"{reasonCode};commanderUnit={commander.Id};groupSize={units.Count}",
+                true));
+        }
+
+        _lastEvent = $"{_players[playerId].Name} recalled {units.Count} units from Commander {commander.CommanderNumber.Value}";
+        return true;
     }
 
     public void Step(int ticks)
@@ -194,14 +480,20 @@ public sealed class GameSimulation
             .ToList();
 
         var citySnapshots = _cities
-            .Select(city => new CitySnapshot(
-                city.Id,
-                city.Name,
-                city.OwnerId,
-                HasHumanPlayer ? CountUnitsOnCity(city, GameConstants.HumanPlayerId) : 0,
-                HasHumanPlayer ? CountEnemyUnitsOnCity(city, GameConstants.HumanPlayerId) : CountAllUnitsOnCity(city),
-                CountAllUnitsOnCity(city),
-                city.Neighbors.ToArray()))
+            .Select(city =>
+            {
+                var cityCommand = GetActiveCityProductionCommand(city);
+                return new CitySnapshot(
+                    city.Id,
+                    city.Name,
+                    city.OwnerId,
+                    HasHumanPlayer ? CountUnitsOnCity(city, GameConstants.HumanPlayerId) : 0,
+                    HasHumanPlayer ? CountEnemyUnitsOnCity(city, GameConstants.HumanPlayerId) : CountAllUnitsOnCity(city),
+                    CountAllUnitsOnCity(city),
+                    city.Neighbors.ToArray(),
+                    cityCommand?.CommandType ?? "",
+                    cityCommand?.ReasonCode ?? "");
+            })
             .ToList();
 
         var unitSnapshots = _units
@@ -217,6 +509,16 @@ public sealed class GameSimulation
                 Math.Round(MoraleRules.Clamp(unit.Morale), 3),
                 MoraleRules.Band(unit.Morale).ToString(),
                 unit.IsLeader,
+                unit.CommanderNumber,
+                unit.AssignedCommanderUnitId,
+                unit.AssignedCommanderNumber,
+                IsReserveUnit(unit),
+                GetActiveCommandType(unit),
+                GetLatestReportType(unit),
+                CreateUnitVisibleEnemyIds(unit),
+                CreateAssignedRegionIds(unit),
+                CountAssignedUnits(unit),
+                HasReserveRequest(unit),
                 unit.TargetCityId,
                 unit.TargetRegionId,
                 unit.RemainingGridSteps,
@@ -231,6 +533,36 @@ public sealed class GameSimulation
         var economies = CreateEconomySnapshots();
         var regions = CreateRegionSnapshots();
         var visibility = CreateVisibilitySnapshots();
+        var recentCombatHits = _recentCombatHits
+            .OrderBy(hit => hit.Tick)
+            .ThenBy(hit => hit.DefenderPlayerId)
+            .ThenBy(hit => hit.DefenderUnitId)
+            .Select(hit => new RecentCombatHitSnapshot(
+                hit.Tick,
+                hit.AttackerPlayerId,
+                hit.AttackerUnitId,
+                hit.DefenderPlayerId,
+                hit.DefenderUnitId,
+                hit.DefenderKind.ToString(),
+                hit.Cell.X,
+                hit.Cell.Y,
+                hit.Damage,
+                hit.WasFatal))
+            .ToList();
+        var recentDeaths = _recentDeaths
+            .OrderBy(death => death.Tick)
+            .ThenBy(death => death.PlayerId)
+            .ThenBy(death => death.UnitId)
+            .Select(death => new RecentUnitDeathSnapshot(
+                death.Tick,
+                death.UnitId,
+                death.PlayerId,
+                death.Kind.ToString(),
+                death.Cell.X,
+                death.Cell.Y))
+            .ToList();
+        var commands = CreateCommandRecordSnapshots();
+        var reports = CreateReportRecordSnapshots();
 
         return new MatchSnapshot(
             Tick,
@@ -253,8 +585,361 @@ public sealed class GameSimulation
             territoryBoundaries,
             economies,
             regions,
-            visibility);
+            visibility,
+            recentCombatHits,
+            recentDeaths,
+            commands,
+            reports);
     }
+
+    private string GetActiveCommandType(TacticalUnit unit)
+        => GetActiveCommandForUnit(unit)?.CommandType ?? "";
+
+    private CommandRecordSnapshot? GetActiveCityProductionCommand(CityNode city)
+    {
+        for (var index = _commandRecords.Count - 1; index >= 0; index--)
+        {
+            var command = _commandRecords[index];
+            if (command.IsActive &&
+                command.Layer == GeneralToCityLayer &&
+                command.TargetCityId == city.Id)
+            {
+                return command;
+            }
+        }
+
+        return null;
+    }
+
+    private CommandRecordSnapshot? GetActiveCommandForUnit(TacticalUnit unit, string? layer = null)
+    {
+        for (var index = _commandRecords.Count - 1; index >= 0; index--)
+        {
+            var command = _commandRecords[index];
+            if (command.IsActive &&
+                command.PlayerId == unit.PlayerId &&
+                command.TargetUnitId == unit.Id &&
+                (layer == null || command.Layer == layer))
+            {
+                return command;
+            }
+        }
+
+        return null;
+    }
+
+    private string GetLatestReportType(TacticalUnit unit)
+    {
+        for (var index = _reportRecords.Count - 1; index >= 0; index--)
+        {
+            var report = _reportRecords[index];
+            if (report.PlayerId == unit.PlayerId &&
+                (report.SourceUnitId == unit.Id || report.TargetUnitId == unit.Id))
+            {
+                return report.ReportType;
+            }
+        }
+
+        return "";
+    }
+
+    private IReadOnlyList<int> CreateUnitVisibleEnemyIds(TacticalUnit unit)
+        => _units
+            .Where(enemy => UnitParticipates(enemy) &&
+                enemy.PlayerId != unit.PlayerId &&
+                CanUnitSee(unit, enemy.Cell))
+            .OrderBy(enemy => enemy.Id)
+            .Select(enemy => enemy.Id)
+            .ToList();
+
+    private IReadOnlyList<int> CreateAssignedRegionIds(TacticalUnit unit)
+        => unit.Kind == UnitKind.Commander
+            ? CreateAssignedRegionIds(unit.PlayerId, unit.Id)
+            : [];
+
+    private IReadOnlyList<int> CreateAssignedRegionIds(int playerId, int commanderUnitId)
+        => CreateCommanderRegionAssignments(playerId)
+            .Where(assignment => assignment.CommanderUnitId == commanderUnitId)
+            .Select(assignment => assignment.RegionId)
+            .OrderBy(id => id)
+            .ToList();
+
+    private int CountAssignedUnits(TacticalUnit unit)
+        => unit.Kind == UnitKind.Commander
+            ? _units.Count(candidate => UnitParticipates(candidate) &&
+                candidate.PlayerId == unit.PlayerId &&
+                candidate.AssignedCommanderUnitId == unit.Id)
+            : 0;
+
+    private bool HasReserveRequest(TacticalUnit unit)
+        => unit.Kind == UnitKind.Commander &&
+            _reportRecords.Any(report =>
+                report.PlayerId == unit.PlayerId &&
+                report.SourceUnitId == unit.Id &&
+                report.ReportType is NeedReinforcementsReport or ReserveRecallRequestedReport);
+
+    private void AddCommandRecord(CommandRecordSnapshot record)
+    {
+        if (record.IsActive)
+        {
+            for (var index = 0; index < _commandRecords.Count; index++)
+            {
+                if (UsesSameActiveCommandSlot(_commandRecords[index], record))
+                    _commandRecords[index] = _commandRecords[index] with { IsActive = false };
+            }
+        }
+
+        _commandRecords.Add(record);
+        TrimCommandRecords(record.PlayerId);
+    }
+
+    private static bool UsesSameActiveCommandSlot(CommandRecordSnapshot existing, CommandRecordSnapshot next)
+        => existing.IsActive &&
+            existing.PlayerId == next.PlayerId &&
+            ((next.TargetUnitId.HasValue && existing.TargetUnitId == next.TargetUnitId && existing.Layer == next.Layer) ||
+             (next.Layer == GeneralToCityLayer && existing.Layer == GeneralToCityLayer &&
+              next.TargetCityId.HasValue && existing.TargetCityId == next.TargetCityId) ||
+             (!next.TargetUnitId.HasValue && next.Layer != GeneralToCityLayer &&
+              existing.Layer == next.Layer &&
+              existing.SourceUnitId == next.SourceUnitId));
+
+    private void TrimCommandRecords(int playerId)
+    {
+        while (_commandRecords.Count(command => command.PlayerId == playerId) > MaxCommandRecordsPerPlayer)
+        {
+            var index = _commandRecords.FindIndex(command => command.PlayerId == playerId);
+            if (index < 0)
+                return;
+
+            _commandRecords.RemoveAt(index);
+        }
+    }
+
+    private void AddReportRecord(ReportRecordSnapshot record)
+    {
+        _reportRecords.Add(record);
+        TrimReportRecords(record.PlayerId);
+    }
+
+    private void TrimReportRecords(int playerId)
+    {
+        while (_reportRecords.Count(report => report.PlayerId == playerId) > MaxReportRecordsPerPlayer)
+        {
+            var index = _reportRecords.FindIndex(report => report.PlayerId == playerId);
+            if (index < 0)
+                return;
+
+            _reportRecords.RemoveAt(index);
+        }
+    }
+
+    private void EmitGeneralRegionCommand(PlayerState player)
+    {
+        foreach (var commander in GetPlayerCommanders(player.Id))
+        {
+            var objective = ResolveCommanderObjective(player, commander);
+            AddCommandRecord(new CommandRecordSnapshot(
+                Tick,
+                player.Id,
+                GeneralToCommanderLayer,
+                player.GeneralUnitId ?? commander.Id,
+                commander.Id,
+                commander.CommanderNumber,
+                objective.CommandType,
+                objective.TargetCell.X,
+                objective.TargetCell.Y,
+                objective.TargetCityId,
+                objective.TargetRegionId,
+                objective.Priority,
+                objective.ReasonCode,
+                true));
+        }
+    }
+
+    private static string GeneralRegionCommandType(PlayerDirective directive)
+        => directive == PlayerDirective.Attack ? AttackRegionCommand : HoldRegionCommand;
+
+    private CommanderObjective ResolveCommanderObjective(PlayerState player, TacticalUnit commander)
+    {
+        var region = CreateRegionSnapshots()
+            .Where(region => region.PlayerId == player.Id && region.AssignedCommanderUnitId == commander.Id)
+            .OrderBy(region => region.RegionId)
+            .FirstOrDefault();
+        var regionTarget = region == null ? commander.Cell : RegionCenterCell(region);
+
+        if (TryGetRecentCommanderReport(player.Id, commander.Id, CommanderThreatenedReport, out var threatened))
+        {
+            return new CommanderObjective(
+                HoldRegionCommand,
+                ReportCellOrFallback(threatened, commander.Cell),
+                null,
+                region?.RegionId ?? player.TargetRegionId,
+                1.0,
+                $"report={CommanderThreatenedReport};strategy={player.StrategyMode}");
+        }
+
+        var reinforcementRequests = CountRecentCommanderReports(player.Id, commander.Id, NeedReinforcementsReport);
+        if (reinforcementRequests >= 2)
+        {
+            return new CommanderObjective(
+                HoldRegionCommand,
+                regionTarget,
+                null,
+                region?.RegionId ?? player.TargetRegionId,
+                0.9,
+                $"report={NeedReinforcementsReport};count={reinforcementRequests};strategy={player.StrategyMode}");
+        }
+
+        if (player.Directive == PlayerDirective.Attack &&
+            TryGetRecentCommanderReport(player.Id, commander.Id, RegionContestedReport, out var contested))
+        {
+            var contestedCell = ReportCellOrFallback(contested, regionTarget);
+            return new CommanderObjective(
+                AttackRegionCommand,
+                contestedCell,
+                null,
+                region?.RegionId ?? player.TargetRegionId,
+                1.0,
+                $"report={RegionContestedReport};strategy={player.StrategyMode}");
+        }
+
+        if (player.Directive == PlayerDirective.Attack)
+        {
+            var city = ResolveAttackCityForCommander(player, commander);
+            if (city != null)
+            {
+                return new CommanderObjective(
+                    AttackRegionCommand,
+                    city.GridPosition,
+                    city.Id,
+                    region?.RegionId ?? player.TargetRegionId,
+                    0.85,
+                    $"directive={player.Directive};strategy={player.StrategyMode}");
+            }
+        }
+
+        var holdCity = player.Directive == PlayerDirective.Defend
+            ? SelectThreatenedOwnedCity(player) ?? ResolveOwnedCityClosestTo(player, commander.Cell)
+            : ResolveOwnedCityClosestTo(player, commander.Cell);
+        return new CommanderObjective(
+            HoldRegionCommand,
+            holdCity?.GridPosition ?? regionTarget,
+            holdCity?.Id,
+            region?.RegionId ?? player.TargetRegionId,
+            0.65,
+            $"directive={player.Directive};strategy={player.StrategyMode}");
+    }
+
+    private static GridPoint RegionCenterCell(RegionSnapshot region)
+        => new(region.BoundsX + Math.Max(0, region.Width - 1) / 2, region.BoundsY + Math.Max(0, region.Height - 1) / 2);
+
+    private static GridPoint ReportCellOrFallback(ReportRecordSnapshot report, GridPoint fallback)
+        => report.CellX.HasValue && report.CellY.HasValue
+            ? new GridPoint(report.CellX.Value, report.CellY.Value)
+            : fallback;
+
+    private bool TryGetRecentCommanderReport(
+        int playerId,
+        int commanderUnitId,
+        string reportType,
+        out ReportRecordSnapshot report)
+    {
+        var found = _reportRecords
+            .Where(report =>
+                report.PlayerId == playerId &&
+                report.SourceUnitId == commanderUnitId &&
+                report.ReportType == reportType &&
+                Tick - report.Tick <= PlanningInterval * 4)
+            .OrderByDescending(report => report.Tick)
+            .ThenBy(report => report.SourceUnitId)
+            .FirstOrDefault();
+        if (found == null)
+        {
+            report = null!;
+            return false;
+        }
+
+        report = found;
+        return true;
+    }
+
+    private int CountRecentCommanderReports(int playerId, int commanderUnitId, string reportType)
+        => _reportRecords.Count(report =>
+            report.PlayerId == playerId &&
+            report.SourceUnitId == commanderUnitId &&
+            report.ReportType == reportType &&
+            Tick - report.Tick <= PlanningInterval * 4);
+
+    private bool HasRecentCommanderReport(int playerId, string reportType)
+        => _reportRecords.Any(report =>
+            report.PlayerId == playerId &&
+            report.Layer == CommanderToGeneralLayer &&
+            report.ReportType == reportType &&
+            Tick - report.Tick <= PlanningInterval * 4);
+
+    private int CountRecentCommanderReports(int playerId, string reportType)
+        => _reportRecords.Count(report =>
+            report.PlayerId == playerId &&
+            report.Layer == CommanderToGeneralLayer &&
+            report.ReportType == reportType &&
+            Tick - report.Tick <= PlanningInterval * 4);
+
+    private void EmitCommanderUnitCommand(
+        PlayerState player,
+        TacticalUnit unit,
+        string commandType,
+        GridPoint targetCell,
+        string reasonCode)
+    {
+        if (!CanAssignToCommander(unit) ||
+            !unit.AssignedCommanderUnitId.HasValue ||
+            unit.AssignedCommanderNumber is null)
+        {
+            return;
+        }
+
+        var commander = _units.FirstOrDefault(candidate =>
+            candidate.Id == unit.AssignedCommanderUnitId.Value &&
+            UnitParticipates(candidate) &&
+            candidate.PlayerId == player.Id &&
+            candidate.Kind == UnitKind.Commander);
+        if (commander == null)
+            return;
+
+        AddCommandRecord(new CommandRecordSnapshot(
+            Tick,
+            player.Id,
+            CommanderToUnitLayer,
+            commander.Id,
+            unit.Id,
+            unit.AssignedCommanderNumber,
+            commandType,
+            targetCell.X,
+            targetCell.Y,
+            unit.TargetCityId,
+            unit.TargetRegionId,
+            commandType == AdvanceToCellCommand ? 0.85 : 0.55,
+            reasonCode,
+            true));
+    }
+
+    private IReadOnlyList<CommandRecordSnapshot> CreateCommandRecordSnapshots()
+        => _commandRecords
+            .OrderBy(command => command.Tick)
+            .ThenBy(command => command.PlayerId)
+            .ThenBy(command => command.SourceUnitId)
+            .ThenBy(command => command.TargetUnitId ?? int.MaxValue)
+            .ThenBy(command => command.CommandType, StringComparer.Ordinal)
+            .ToList();
+
+    private IReadOnlyList<ReportRecordSnapshot> CreateReportRecordSnapshots()
+        => _reportRecords
+            .OrderBy(report => report.Tick)
+            .ThenBy(report => report.PlayerId)
+            .ThenBy(report => report.SourceUnitId)
+            .ThenBy(report => report.TargetUnitId ?? int.MaxValue)
+            .ThenBy(report => report.ReportType, StringComparer.Ordinal)
+            .ToList();
 
     public IReadOnlyList<TerritoryBoundarySegment> CreateTerritoryBoundaries()
     {
@@ -431,7 +1116,7 @@ public sealed class GameSimulation
         {
             var next = unit.IsMoving ? unit.Path[unit.PathIndex + 1] : unit.Cell;
             builder.Append(CultureInfo.InvariantCulture,
-                $"u{unit.Id}:{unit.PlayerId}:{unit.Kind}:{unit.Cell.X},{unit.Cell.Y}:{next.X},{next.Y}:{unit.TargetCityId}:{unit.TargetRegionId}:{unit.PathIndex}:{unit.StepProgress:F2}:{unit.Health:F1}:{unit.Morale:F2}:{unit.IsProtectionDetail}:{unit.IsScout};");
+                $"u{unit.Id}:{unit.PlayerId}:{unit.Kind}:{unit.CommanderNumber?.ToString(CultureInfo.InvariantCulture) ?? "-"}:{unit.AssignedCommanderUnitId?.ToString(CultureInfo.InvariantCulture) ?? "-"}:{unit.AssignedCommanderNumber?.ToString(CultureInfo.InvariantCulture) ?? "-"}:{unit.Cell.X},{unit.Cell.Y}:{next.X},{next.Y}:{unit.TargetCityId}:{unit.TargetRegionId}:{unit.PathIndex}:{unit.StepProgress:F2}:{unit.Health:F1}:{unit.Morale:F2}:{unit.IsProtectionDetail}:{unit.IsScout};");
         }
 
         return Fingerprint.Create(builder.ToString());
@@ -465,13 +1150,14 @@ public sealed class GameSimulation
         player.GeneralUnitId = general.Id;
         player.GeneralCityId = home.Id;
 
-        var commander = CreateUnitNear(player.Id, UnitKind.Commander, Offset(homeCell, 0, -1));
-        player.CommanderUnitId = commander.Id;
+        var commanderOne = CreateUnitNear(player.Id, UnitKind.Commander, Offset(homeCell, 0, -1));
+        var commanderTwo = CreateUnitNear(player.Id, UnitKind.Commander, Offset(homeCell, 1, -1));
+        player.CommanderUnitId = commanderOne.Id;
         player.CommanderCityId = home.Id;
 
-        CreateUnitNear(player.Id, UnitKind.Infantry, Offset(homeCell, 1, 0));
-        CreateUnitNear(player.Id, UnitKind.Infantry, Offset(homeCell, 0, 2));
-        CreateUnitNear(player.Id, UnitKind.Tank, Offset(homeCell, -2, 0));
+        AssignUnitToCommander(CreateUnitNear(player.Id, UnitKind.Infantry, Offset(homeCell, 1, 0)), commanderOne);
+        AssignUnitToCommander(CreateUnitNear(player.Id, UnitKind.Infantry, Offset(homeCell, 0, 2)), commanderOne);
+        AssignUnitToCommander(CreateUnitNear(player.Id, UnitKind.Tank, Offset(homeCell, -2, 0)), commanderTwo);
     }
 
     private TacticalUnit CreateUnitNear(int playerId, UnitKind kind, GridPoint preferredCell)
@@ -491,6 +1177,7 @@ public sealed class GameSimulation
             Kind = kind,
             Cell = cell,
             CurrentPosition = _grid.ToMapPoint(cell),
+            CommanderNumber = kind == UnitKind.Commander ? ReserveCommanderNumber(playerId) : null,
             Health = TacticalUnit.DefaultHealth(kind)
         };
         unit.VisualFromCell = cell;
@@ -500,6 +1187,165 @@ public sealed class GameSimulation
 
         _units.Add(unit);
         return unit;
+    }
+
+    private int ReserveCommanderNumber(int playerId)
+        => _players[playerId].NextCommanderNumber++;
+
+    private static bool CanAssignToCommander(TacticalUnit unit)
+        => unit.Kind is UnitKind.Infantry or UnitKind.Tank;
+
+    private static bool IsReserveUnit(TacticalUnit unit)
+        => CanAssignToCommander(unit) && !unit.AssignedCommanderUnitId.HasValue;
+
+    private void ReleaseCommanderUnitsToReserve(TacticalUnit deadCommander)
+    {
+        foreach (var unit in _units)
+        {
+            if (unit.AssignedCommanderUnitId == deadCommander.Id &&
+                UnitParticipates(unit))
+            {
+                unit.AssignedCommanderUnitId = null;
+                unit.AssignedCommanderNumber = null;
+                unit.IsProtectionDetail = false;
+                unit.IsScout = false;
+            }
+        }
+    }
+
+    private static void AssignUnitToCommander(TacticalUnit unit, TacticalUnit commander)
+    {
+        unit.AssignedCommanderUnitId = commander.Id;
+        unit.AssignedCommanderNumber = commander.CommanderNumber;
+    }
+
+    private IReadOnlyList<TacticalUnit> GetPlayerCommanders(int playerId)
+        => _units
+            .Where(unit => UnitParticipates(unit) &&
+                unit.PlayerId == playerId &&
+                unit.Kind == UnitKind.Commander)
+            .OrderBy(unit => unit.CommanderNumber ?? int.MaxValue)
+            .ThenBy(unit => unit.Id)
+            .ToList();
+
+    private IReadOnlyList<CommanderRegionAssignment> CreateCommanderRegionAssignments(int playerId)
+    {
+        if (_explicitRegionAssignments.TryGetValue(playerId, out var explicit_))
+            return explicit_.Where(a => _units.Any(u => u.Id == a.CommanderUnitId && UnitParticipates(u))).ToList();
+
+        return [];
+    }
+
+    private void InitializeExplicitRegionAssignments(PlayerState player)
+    {
+        var commanders = GetPlayerCommanders(player.Id);
+        if (commanders.Count == 0)
+        {
+            _explicitRegionAssignments[player.Id] = [];
+            return;
+        }
+
+        var assignments = new List<CommanderRegionAssignment>();
+        for (var index = 0; index < commanders.Count; index++)
+        {
+            var bounds = CreateCommanderRegionBounds(index, commanders.Count);
+            assignments.Add(new CommanderRegionAssignment(
+                player.Id * 100 + (commanders[index].CommanderNumber ?? index + 1),
+                commanders[index].Id,
+                commanders[index].CommanderNumber,
+                bounds.X,
+                bounds.Y,
+                bounds.Width,
+                bounds.Height));
+        }
+
+        _explicitRegionAssignments[player.Id] = assignments;
+    }
+
+    private void UpdateExplicitRegionAssignments(PlayerState player)
+    {
+        if (!_explicitRegionAssignments.TryGetValue(player.Id, out var assignments))
+        {
+            InitializeExplicitRegionAssignments(player);
+            return;
+        }
+
+        var livingCommanderIds = GetPlayerCommanders(player.Id).Select(c => c.Id).ToHashSet();
+        assignments.RemoveAll(a => !livingCommanderIds.Contains(a.CommanderUnitId));
+
+        if (assignments.Count == 0 && livingCommanderIds.Count > 0)
+        {
+            InitializeExplicitRegionAssignments(player);
+            return;
+        }
+
+        var assignedCommanderIds = assignments.Select(a => a.CommanderUnitId).ToHashSet();
+        var commandersWithRegions = assignments.Count;
+        if (commandersWithRegions > 0)
+        {
+            var totalWidth = _grid.Width;
+            var baseWidth = totalWidth / commandersWithRegions;
+            for (var i = 0; i < assignments.Count; i++)
+            {
+                var x = i * baseWidth;
+                var width = i == assignments.Count - 1 ? totalWidth - x : baseWidth;
+                assignments[i] = assignments[i] with { BoundsX = x, BoundsY = 0, Width = Math.Max(1, width), Height = _grid.Height };
+            }
+        }
+    }
+
+    private void AssignRegionToCommander(PlayerState player, TacticalUnit commander)
+    {
+        if (!_explicitRegionAssignments.TryGetValue(player.Id, out var assignments))
+        {
+            _explicitRegionAssignments[player.Id] = assignments = [];
+        }
+
+        if (assignments.Any(a => a.CommanderUnitId == commander.Id))
+            return;
+
+        var regionId = player.Id * 100 + (commander.CommanderNumber ?? 1);
+        var commandersWithRegions = assignments.Count + 1;
+        var baseWidth = _grid.Width / commandersWithRegions;
+
+        assignments.Add(new CommanderRegionAssignment(
+            regionId,
+            commander.Id,
+            commander.CommanderNumber,
+            0, 0, 1, _grid.Height));
+
+        for (var i = 0; i < assignments.Count; i++)
+        {
+            var x = i * baseWidth;
+            var width = i == assignments.Count - 1 ? _grid.Width - x : baseWidth;
+            assignments[i] = assignments[i] with { BoundsX = x, BoundsY = 0, Width = Math.Max(1, width), Height = _grid.Height };
+        }
+    }
+
+    private void AssignRegionsToUnassignedCommanders(PlayerState player)
+    {
+        if (!_explicitRegionAssignments.TryGetValue(player.Id, out var assignments))
+            return;
+
+        var assignedCommanderIds = assignments.Select(a => a.CommanderUnitId).ToHashSet();
+        foreach (var commander in GetPlayerCommanders(player.Id))
+        {
+            if (assignedCommanderIds.Contains(commander.Id))
+                continue;
+
+            AssignRegionToCommander(player, commander);
+            var generalCommand = GetActiveCommandForUnit(commander, GeneralToCommanderLayer);
+            if (generalCommand == null)
+                EmitGeneralRegionCommand(player);
+        }
+    }
+
+    private (int X, int Y, int Width, int Height) CreateCommanderRegionBounds(int commanderIndex, int commanderCount)
+    {
+        var baseWidth = _grid.Width / commanderCount;
+        var x = commanderIndex * baseWidth;
+        var width = commanderIndex == commanderCount - 1 ? _grid.Width - x : baseWidth;
+        return (x, 0, Math.Max(1, width), _grid.Height);
     }
 
     private void StepOne()
@@ -566,11 +1412,51 @@ public sealed class GameSimulation
             foreach (var city in ownedCities)
             {
                 if (spent >= spendingCap)
-                    break;
+                {
+                    EmitCityProductionCommand(player, city, HoldProductionCommand, null, "SpendingCapReached");
+                    continue;
+                }
 
                 var outputCell = FindAdjacentEmptyCell(city.GridPosition, occupied);
                 if (!outputCell.HasValue)
+                {
+                    EmitCityProductionCommand(player, city, HoldProductionCommand, null, "SpawnBlocked");
                     continue;
+                }
+
+                var commanderProductionTarget = ResolveDesiredCommanderCount(player, ownedCities.Count);
+                var livingCommanders = GetPlayerCommanders(player.Id);
+                var needsCommander = livingCommanders.Count < commanderProductionTarget && player.Resources >= CommanderCost;
+
+                if (needsCommander)
+                {
+                    if (player.Resources < CommanderCost)
+                    {
+                        EmitCityProductionCommand(player, city, HoldProductionCommand, UnitKind.Commander, "InsufficientTreasury");
+                        continue;
+                    }
+
+                    if (player.StrategyMode == StrategyMode.Rebuild && player.Resources < CommanderCost + upkeep)
+                    {
+                        EmitCityProductionCommand(player, city, HoldProductionCommand, UnitKind.Commander, "RebuildMode");
+                        continue;
+                    }
+
+                    if (spent + CommanderCost > spendingCap && spent > 0)
+                    {
+                        EmitCityProductionCommand(player, city, HoldProductionCommand, UnitKind.Commander, "SpendingCapReached");
+                        continue;
+                    }
+
+                    var commander = CreateUnit(player.Id, UnitKind.Commander, outputCell.Value);
+                    occupied[commander.Cell] = commander;
+                    player.Resources -= CommanderCost;
+                    spent += CommanderCost;
+                    EmitCityProductionCommand(player, city, ProduceCommanderCommand, UnitKind.Commander, "CommanderNeeded");
+                    _lastEvent = $"{player.Name} produced Commander {commander.CommanderNumber} near {city.Name}";
+                    needsCommander = false;
+                    continue;
+                }
 
                 var buildInfantry = requestedReinforcements ||
                     player.Resources < TankCost ||
@@ -579,7 +1465,10 @@ public sealed class GameSimulation
                 var cost = kind == UnitKind.Infantry ? InfantryCost : TankCost;
 
                 if (player.StrategyMode == StrategyMode.Rebuild && player.Resources < cost + upkeep)
+                {
+                    EmitCityProductionCommand(player, city, HoldProductionCommand, kind, "RebuildMode");
                     continue;
+                }
 
                 if (player.Resources < cost && kind == UnitKind.Tank)
                 {
@@ -588,11 +1477,19 @@ public sealed class GameSimulation
                 }
 
                 if (player.Resources < cost)
+                {
+                    EmitCityProductionCommand(player, city, HoldProductionCommand, kind, "InsufficientTreasury");
                     continue;
+                }
 
                 if (spent + cost > spendingCap && spent > 0)
+                {
+                    EmitCityProductionCommand(player, city, HoldProductionCommand, kind, "SpendingCapReached");
                     continue;
+                }
 
+                var commandType = kind == UnitKind.Infantry ? ProduceInfantryCommand : ProduceTankCommand;
+                EmitCityProductionCommand(player, city, commandType, kind, "production");
                 var unit = CreateUnit(player.Id, kind, outputCell.Value);
                 occupied[unit.Cell] = unit;
                 player.Resources -= cost;
@@ -604,6 +1501,33 @@ public sealed class GameSimulation
 
         UpdateEconomyState();
     }
+
+    private void EmitCityProductionCommand(
+        PlayerState player,
+        CityNode city,
+        string commandType,
+        UnitKind? unitKind,
+        string reasonCode)
+    {
+        AddCommandRecord(new CommandRecordSnapshot(
+            Tick,
+            player.Id,
+            GeneralToCityLayer,
+            player.GeneralUnitId ?? -1,
+            null,
+            null,
+            commandType,
+            city.GridPosition.X,
+            city.GridPosition.Y,
+            city.Id,
+            null,
+            commandType == HoldProductionCommand ? 0.0 : 0.75,
+            $"{reasonCode};city={city.Id};kind={unitKind?.ToString() ?? ""};treasury={player.Resources:F1}",
+            true));
+    }
+
+    private static int ResolveDesiredCommanderCount(PlayerState player, int ownedCityCount)
+        => Math.Clamp(ownedCityCount, 2, 4);
 
     private void MoveUnits()
     {
@@ -650,7 +1574,10 @@ public sealed class GameSimulation
                 RecordVisualMovement(unit, visualFromCell, nextCell, visualFromPosition);
 
                 if (!unit.IsMoving)
+                {
+                    AddReachedTargetReport(unit);
                     ClearPath(unit);
+                }
             }
             else
             {
@@ -691,6 +1618,17 @@ public sealed class GameSimulation
             defender.Health -= damage;
             defender.Morale = MoraleRules.Clamp(defender.Morale - 0.035);
             attacker.Morale = MoraleRules.Clamp(attacker.Morale + 0.01);
+            AddUnderAttackReport(defender, attacker, damage);
+            _recentCombatHits.Add(new RecentCombatHit(
+                Tick,
+                attacker.PlayerId,
+                attacker.Id,
+                defender.PlayerId,
+                defender.Id,
+                defender.Kind,
+                defender.Cell,
+                damage,
+                defender.Health <= 0));
             _lastEvent = $"{_players[attacker.PlayerId].Name} attacked {_players[defender.PlayerId].Name}'s {defender.Kind}";
 
             if (CountFriendlyAttackVectors(attacker.PlayerId, defender.Cell) >= 2)
@@ -704,6 +1642,7 @@ public sealed class GameSimulation
         }
 
         RemoveDefeatedUnits();
+        TrimRecentCombatVisuals();
     }
 
     private int CountFriendlyAttackVectors(int attackerPlayerId, GridPoint defenderCell)
@@ -711,8 +1650,98 @@ public sealed class GameSimulation
             unit.PlayerId == attackerPlayerId &&
             AreAdjacent(unit.Cell, defenderCell));
 
+    private void AddUnderAttackReport(TacticalUnit defender, TacticalUnit attacker, double damage)
+    {
+        if (defender.Kind is not (UnitKind.Infantry or UnitKind.Tank) ||
+            !defender.AssignedCommanderUnitId.HasValue ||
+            !CanUnitSee(defender, attacker.Cell) ||
+            defender.PlayerId < 0 ||
+            defender.PlayerId >= _players.Count)
+        {
+            return;
+        }
+
+        AddReportRecord(new ReportRecordSnapshot(
+            Tick,
+            defender.PlayerId,
+            UnitToCommanderLayer,
+            defender.Id,
+            defender.AssignedCommanderUnitId,
+            defender.AssignedCommanderNumber,
+            UnderAttackReport,
+            defender.Cell.X,
+            defender.Cell.Y,
+            Math.Round(Math.Clamp(damage / TacticalUnit.DefaultHealth(defender.Kind), 0, 1), 3),
+            $"attackerPlayer={attacker.PlayerId};attackerUnit={attacker.Id}"));
+    }
+
+    private void AddLowMoraleReport(TacticalUnit unit, MoraleBand band)
+    {
+        if (!CanAssignToCommander(unit) ||
+            !unit.AssignedCommanderUnitId.HasValue ||
+            unit.PlayerId < 0 ||
+            unit.PlayerId >= _players.Count)
+        {
+            return;
+        }
+
+        AddReportRecord(new ReportRecordSnapshot(
+            Tick,
+            unit.PlayerId,
+            UnitToCommanderLayer,
+            unit.Id,
+            unit.AssignedCommanderUnitId,
+            unit.AssignedCommanderNumber,
+            LowMoraleReport,
+            unit.Cell.X,
+            unit.Cell.Y,
+            band == MoraleBand.Routed ? 1.0 : 0.7,
+            $"band={band};morale={unit.Morale:F2}"));
+    }
+
+    private void AddReachedTargetReport(TacticalUnit unit)
+    {
+        if (!CanAssignToCommander(unit) ||
+            !unit.AssignedCommanderUnitId.HasValue ||
+            unit.PlayerId < 0 ||
+            unit.PlayerId >= _players.Count)
+        {
+            return;
+        }
+
+        AddReportRecord(new ReportRecordSnapshot(
+            Tick,
+            unit.PlayerId,
+            UnitToCommanderLayer,
+            unit.Id,
+            unit.AssignedCommanderUnitId,
+            unit.AssignedCommanderNumber,
+            ReachedTargetReport,
+            unit.Cell.X,
+            unit.Cell.Y,
+            0.35,
+            $"targetCity={unit.TargetCityId?.ToString(CultureInfo.InvariantCulture) ?? ""};targetRegion={unit.TargetRegionId?.ToString(CultureInfo.InvariantCulture) ?? ""}"));
+    }
+
     private void ApplyCommanderUnderAttackMorale(TacticalUnit commander, int attackerPlayerId)
     {
+        if (commander.PlayerId >= 0 &&
+            commander.PlayerId < _players.Count)
+        {
+            AddReportRecord(new ReportRecordSnapshot(
+                Tick,
+                commander.PlayerId,
+                CommanderToGeneralLayer,
+                commander.Id,
+                _players[commander.PlayerId].GeneralUnitId,
+                commander.CommanderNumber,
+                CommanderThreatenedReport,
+                commander.Cell.X,
+                commander.Cell.Y,
+                1.0,
+                $"attackerPlayer={attackerPlayerId}"));
+        }
+
         foreach (var unit in _units.Where(unit => UnitParticipates(unit) &&
                      unit.PlayerId == commander.PlayerId &&
                      unit.Id != commander.Id &&
@@ -733,13 +1762,24 @@ public sealed class GameSimulation
                 continue;
 
             var player = _players[unit.PlayerId];
-            _recentDeaths.Add(new RecentUnitDeath(Tick, unit.PlayerId, unit.Cell, unit.Kind));
+            _recentDeaths.Add(new RecentUnitDeath(Tick, unit.Id, unit.PlayerId, unit.Cell, unit.Kind));
             ApplyFriendlyDeathMorale(unit);
             if (unit.Kind == UnitKind.Commander)
             {
-                player.CommanderHealth = 0;
-                player.CommanderUnitId = null;
+                player.CommanderUnitId = _units
+                    .Where(candidate => candidate.Id != unit.Id &&
+                        candidate.Health > 0 &&
+                        candidate.PlayerId == player.Id &&
+                        candidate.Kind == UnitKind.Commander)
+                    .OrderBy(candidate => candidate.CommanderNumber ?? int.MaxValue)
+                    .ThenBy(candidate => candidate.Id)
+                    .Select(candidate => (int?)candidate.Id)
+                    .FirstOrDefault();
+                player.CommanderHealth = player.CommanderUnitId.HasValue
+                    ? _units.First(candidate => candidate.Id == player.CommanderUnitId.Value).Health
+                    : 0;
                 player.CommanderLeaderlessUntilTick = Tick + 48;
+                ReleaseCommanderUnitsToReserve(unit);
                 ApplyCommanderDeathMorale(player.Id, unit.Cell);
                 _lastEvent = $"{player.Name} lost a commander";
             }
@@ -759,7 +1799,18 @@ public sealed class GameSimulation
 
         _units.RemoveAll(unit => unit.Health <= 0 ||
             unit.PlayerId >= 0 && unit.PlayerId < _players.Count && _players[unit.PlayerId].IsEliminated);
-        _recentDeaths.RemoveAll(death => Tick - death.Tick > 24);
+        TrimRecentCombatVisuals();
+    }
+
+    private void TrimRecentCombatVisuals()
+    {
+        _recentCombatHits.RemoveAll(hit => Tick - hit.Tick > RecentCombatVisualLifetimeTicks);
+        if (_recentCombatHits.Count > MaxRecentCombatHits)
+            _recentCombatHits.RemoveRange(0, _recentCombatHits.Count - MaxRecentCombatHits);
+
+        _recentDeaths.RemoveAll(death => Tick - death.Tick > RecentCombatVisualLifetimeTicks);
+        if (_recentDeaths.Count > MaxRecentDeaths)
+            _recentDeaths.RemoveRange(0, _recentDeaths.Count - MaxRecentDeaths);
     }
 
     private void ResolveCityCapture()
@@ -890,7 +1941,7 @@ public sealed class GameSimulation
             {
                 UnitKind.Infantry => 0.20,
                 UnitKind.Tank => 0.45,
-                UnitKind.Commander => 0.30,
+                UnitKind.Commander => CommanderUpkeep,
                 UnitKind.General => 0.25,
                 _ => 0.20
             });
@@ -937,6 +1988,8 @@ public sealed class GameSimulation
             var afterBand = MoraleRules.Band(unit.Morale);
             if (beforeBand == MoraleBand.Routed && afterBand != MoraleBand.Routed)
                 AddTelemetry(unit.PlayerId, "Rally", $"unit={unit.Id};band={afterBand}");
+            if (beforeBand != afterBand && afterBand is MoraleBand.Routed or MoraleBand.RoutRisk)
+                AddLowMoraleReport(unit, afterBand);
         }
     }
 
@@ -1022,9 +2075,13 @@ public sealed class GameSimulation
     {
         foreach (var player in _players.Where(p => !p.IsEliminated))
         {
+            UpdateExplicitRegionAssignments(player);
+            AssignRegionsToUnassignedCommanders(player);
+
             if (player.Kind == PlayerKind.Ai)
             {
                 UpdateAiPlan(player);
+                ApplyAiReserveCommands(player);
             }
             else if (player.HumanControlMode is HumanControlMode.Commander or HumanControlMode.GeneralAndCommander or HumanControlMode.DotChaos)
             {
@@ -1049,20 +2106,38 @@ public sealed class GameSimulation
     {
         var controller = _generalControllers[player.Id];
         var observation = BuildObservation(player);
-        var perception = BuildGeneralPerception(player, observation);
-        var decision = controller.Decide(perception);
-        var holdDecay = ResolveHoldDecay(decision.Directive, player.ConsecutiveHoldPlans, HasNearbyEnemyPressure(player));
+        var primaryCommander = GetLeaderUnit(player, UnitKind.Commander);
+        var hasForeignCity = _cities.Any(city => city.OwnerId != player.Id);
+        var threatened = HasRecentCommanderReport(player.Id, CommanderThreatenedReport) || player.GeneralSecurity < 0.45;
+        var contested = HasRecentCommanderReport(player.Id, RegionContestedReport);
+        var repeatedReinforcementRequests = CountRecentCommanderReports(player.Id, NeedReinforcementsReport) >= 2;
+        var plannedDirective = threatened || repeatedReinforcementRequests
+            ? PlayerDirective.Hold
+            : hasForeignCity || contested ? PlayerDirective.Attack : PlayerDirective.Hold;
+        var holdDecay = ResolveHoldDecay(plannedDirective, player.ConsecutiveHoldPlans, HasNearbyEnemyPressure(player));
 
         player.Directive = holdDecay.Directive;
         player.ConsecutiveHoldPlans = holdDecay.ConsecutiveHoldPlans;
-        player.TargetCityId = decision.TargetCityId;
-        player.TargetRegionId = decision.TargetRegionId;
-        player.LightPreference = decision.LightPreference;
-        player.StrategyMode = decision.StrategyMode;
-        player.ReserveBudget = Math.Round(Math.Max(0, player.Resources) * decision.ResourceBudgetRatio, 2);
-        player.ScoutDirective = decision.StrategyMode != StrategyMode.Rebuild || player.GeneralSecurity > 0.7;
+        var targetCity = primaryCommander == null ? null : ResolveAttackCityForCommander(player, primaryCommander);
+        if (targetCity != null)
+            player.TargetCityId = targetCity.Id;
+        var primaryRegion = primaryCommander == null
+            ? null
+            : CreateRegionSnapshots()
+                .Where(region => region.PlayerId == player.Id && region.AssignedCommanderUnitId == primaryCommander.Id)
+                .OrderBy(region => region.RegionId)
+                .FirstOrDefault();
+        if (primaryRegion != null)
+            player.TargetRegionId = primaryRegion.RegionId;
+        var seedBias = StableUnitInterval(Settings.Seed, player.Id);
+        player.LightPreference = Math.Clamp(0.58 + seedBias * 0.12 + player.EconomyRisk * 0.25 + (repeatedReinforcementRequests ? 0.15 : 0), 0.25, 0.9);
+        player.StrategyMode = player.EconomyRisk > 0.65
+            ? StrategyMode.Rebuild
+            : threatened ? StrategyMode.ProtectGeneral : StrategyMode.Advance;
+        player.ReserveBudget = Math.Round(Math.Max(0, player.Resources) * Math.Clamp(1.0 - player.EconomyRisk * 0.55, 0.15, 1.0), 2);
+        player.ScoutDirective = player.StrategyMode != StrategyMode.Rebuild || player.GeneralSecurity > 0.7;
         var planningLeader = GetLeaderUnit(player, UnitKind.General) ?? GetLeaderUnit(player, UnitKind.Commander);
-        player.GeneralRelocationCityId = decision.StrategyMode == StrategyMode.ProtectGeneral && planningLeader != null
+        player.GeneralRelocationCityId = player.StrategyMode == StrategyMode.ProtectGeneral && planningLeader != null
             ? ResolveRetreatCity(player, planningLeader).Id
             : null;
 
@@ -1070,9 +2145,26 @@ public sealed class GameSimulation
             player.Id,
             "AiPlan",
             $"owned={observation.OwnedCityRatio:F2},cells={observation.ControlledCellRatio:F2},strength={observation.StrengthRatio:F2},risk={observation.EconomyRisk:F2}",
-            holdDecay.Decayed ? $"{decision.DebugLabel}:hold-decayed" : decision.DebugLabel,
-            decision.FitnessDelta,
+            $"simple-attack:{player.Directive}:target={player.TargetCityId}:contested={contested}:threat={threatened}:reinforce={repeatedReinforcementRequests}" +
+                (holdDecay.Decayed ? ":hold-decayed" : ""),
+            contested ? 0.12 : threatened ? -0.08 : 0.04,
             controller.ControllerId);
+    }
+
+    private void ApplyAiReserveCommands(PlayerState player)
+    {
+        foreach (var commander in GetPlayerCommanders(player.Id))
+        {
+            var recalled = false;
+            if (TryGetRecentCommanderReport(player.Id, commander.Id, ReserveRecallRequestedReport, out _))
+                recalled = TryRecallCommanderGroupToReserve(player.Id, commander.Id, maxUnits: 1, "recall-request");
+
+            if (recalled)
+                continue;
+
+            if (TryGetRecentCommanderReport(player.Id, commander.Id, NeedReinforcementsReport, out _))
+                TryAssignReserveGroupToCommander(player.Id, commander.Id, maxUnits: 2, "reinforcement");
+        }
     }
 
     internal static (PlayerDirective Directive, int ConsecutiveHoldPlans, bool Decayed) ResolveHoldDecay(
@@ -1170,45 +2262,187 @@ public sealed class GameSimulation
 
     private void AssignUnitOrders(PlayerState player)
     {
-        if (player.Directive == PlayerDirective.Hold)
+        EmitGeneralRegionCommand(player);
+        AssignSimpleCommanderRoles(player);
+
+        foreach (var unit in _units
+                     .Where(unit => UnitParticipates(unit) && unit.PlayerId == player.Id && IsReserveUnit(unit))
+                     .OrderBy(unit => unit.Id))
         {
-            foreach (var unit in _units.Where(unit => UnitParticipates(unit) && unit.PlayerId == player.Id))
-                ClearPath(unit, resetVisualState: true);
+            ClearPath(unit, resetVisualState: true);
+        }
+
+        foreach (var commander in GetPlayerCommanders(player.Id))
+        {
+            var generalCommand = GetActiveCommandForUnit(commander, GeneralToCommanderLayer);
+            if (generalCommand == null)
+                continue;
+
+            ApplyGeneralCommandToCommander(player, commander, generalCommand);
+            ApplyCommanderCommandToAssignedUnits(player, commander, generalCommand);
+        }
+
+        ApplyGeneralSelfMovement(player);
+    }
+
+    private void ApplyGeneralSelfMovement(PlayerState player)
+    {
+        var general = GetLeaderUnit(player, UnitKind.General);
+        if (general == null)
+            return;
+
+        if (player.GeneralRelocationCityId.HasValue)
+        {
+            TryAssignGeneralRelocationPath(player, general, ResolveTargetCity(player));
             return;
         }
 
-        ApplyCommanderRegionOrder(player);
-
-        var target = ResolveTargetCity(player);
-        player.TargetCityId = target.Id;
-
-        foreach (var unit in _units
-                     .Where(unit => UnitParticipates(unit) && unit.PlayerId == player.Id)
-                     .OrderBy(unit => unit.Kind == UnitKind.General ? 1 : 0)
-                     .ThenBy(unit => unit.Id))
+        if (player.Kind == PlayerKind.Human &&
+            player.Directive == PlayerDirective.Attack &&
+            player.TargetCityId >= 0 &&
+            player.TargetCityId < _cities.Count)
         {
-            var unitAction = _unitController.Decide(BuildUnitPerception(unit));
-            if (unitAction.Hold)
+            AssignPathToTarget(general, _cities[player.TargetCityId]);
+            return;
+        }
+
+        if (player.StrategyMode == StrategyMode.ProtectGeneral || player.GeneralSecurity < 0.45)
+            AssignPathToTarget(general, ResolveRetreatCity(player, general));
+    }
+
+    private void ApplyGeneralCommandToCommander(
+        PlayerState player,
+        TacticalUnit commander,
+        CommandRecordSnapshot command)
+    {
+        commander.TargetRegionId = command.TargetRegionId;
+        commander.TargetCityId = command.TargetCityId;
+        if (!TryGetCommandTargetCell(command, out var targetCell))
+        {
+            ClearPath(commander, resetVisualState: true);
+            return;
+        }
+
+        if (command.CommandType == HoldRegionCommand && commander.Cell.ChebyshevDistanceTo(targetCell) <= 1)
+        {
+            ClearPath(commander, resetVisualState: true);
+            return;
+        }
+
+        AssignPathToCommandTarget(commander, targetCell, command.TargetCityId);
+    }
+
+    private void ApplyCommanderCommandToAssignedUnits(
+        PlayerState player,
+        TacticalUnit commander,
+        CommandRecordSnapshot generalCommand)
+    {
+        if (!TryGetCommandTargetCell(generalCommand, out var generalTargetCell))
+            generalTargetCell = commander.Cell;
+
+        var assignedUnits = _units
+            .Where(unit => UnitParticipates(unit) &&
+                unit.PlayerId == player.Id &&
+                CanAssignToCommander(unit) &&
+                unit.AssignedCommanderUnitId == commander.Id)
+            .OrderBy(unit => unit.Id)
+            .ToList();
+
+        foreach (var unit in assignedUnits)
+        {
+            unit.TargetRegionId = generalCommand.TargetRegionId;
+            unit.TargetCityId = generalCommand.TargetCityId;
+            var moraleBand = MoraleRules.Band(unit.Morale);
+            var enemyAdjacent = FindAdjacentEnemy(unit, BuildOccupiedCells(unit.Id)) != null;
+            if (moraleBand == MoraleBand.Routed ||
+                !enemyAdjacent && unit.Morale < MoraleRules.CautiousThreshold)
             {
-                ClearPath(unit, resetVisualState: true);
+                var retreat = ResolveRetreatCity(player, unit);
+                EmitCommanderUnitCommand(player, unit, DefendCellCommand, retreat.GridPosition, "morale-retreat");
+                AssignPathToTarget(unit, retreat);
                 continue;
             }
 
-            unit.TargetRegionId = player.TargetRegionId;
-            if (TryAssignProtectionDetailPath(player, unit))
+            if (generalCommand.CommandType == HoldRegionCommand)
+            {
+                var defendCell = ResolveDefendCell(unit, commander, generalTargetCell);
+                EmitCommanderUnitCommand(player, unit, DefendCellCommand, defendCell, "general=HoldRegion");
+                if (unit.Cell.ChebyshevDistanceTo(defendCell) <= 1)
+                    ClearPath(unit, resetVisualState: true);
+                else
+                    AssignPathToCommandTarget(unit, defendCell, generalCommand.TargetCityId);
+                continue;
+            }
+
+            EmitCommanderUnitCommand(player, unit, AdvanceToCellCommand, generalTargetCell, "general=AttackRegion");
+            AssignPathToCommandTarget(unit, generalTargetCell, generalCommand.TargetCityId);
+        }
+    }
+
+    private static bool TryGetCommandTargetCell(CommandRecordSnapshot command, out GridPoint targetCell)
+    {
+        if (command.TargetCellX.HasValue && command.TargetCellY.HasValue)
+        {
+            targetCell = new GridPoint(command.TargetCellX.Value, command.TargetCellY.Value);
+            return true;
+        }
+
+        targetCell = default;
+        return false;
+    }
+
+    private GridPoint ResolveDefendCell(TacticalUnit unit, TacticalUnit commander, GridPoint targetCell)
+        => FindNearestEmptyPassableCell(
+                targetCell,
+                includePreferred: true,
+                exceptUnitId: unit.Id,
+                allowCityCells: false)
+            ?? commander.Cell;
+
+    private void AssignPathToCommandTarget(TacticalUnit unit, GridPoint targetCell, int? targetCityId)
+    {
+        if (targetCityId.HasValue && targetCityId.Value >= 0 && targetCityId.Value < _cities.Count)
+        {
+            AssignPathToTarget(unit, _cities[targetCityId.Value]);
+            return;
+        }
+
+        var destination = FindNearestEmptyPassableCell(
+            targetCell,
+            includePreferred: true,
+            exceptUnitId: unit.Id,
+            allowCityCells: !IsCityCell(targetCell));
+        AssignPathToCell(unit, destination ?? targetCell, targetCityId);
+    }
+
+    private void AssignSimpleCommanderRoles(PlayerState player)
+    {
+        ClearSpecialRoles(player);
+        foreach (var commander in GetPlayerCommanders(player.Id))
+        {
+            var assigned = _units
+                .Where(unit => UnitParticipates(unit) &&
+                    unit.PlayerId == player.Id &&
+                    unit.Kind is UnitKind.Infantry or UnitKind.Tank &&
+                    unit.AssignedCommanderUnitId == commander.Id)
+                .OrderBy(unit => unit.Cell.OctileDistanceTo(commander.Cell))
+                .ThenBy(unit => unit.Id)
+                .ToList();
+            var protection = assigned.FirstOrDefault();
+            if (protection != null)
+                protection.IsProtectionDetail = true;
+
+            if (!player.ScoutDirective || player.StrategyMode == StrategyMode.Rebuild)
                 continue;
 
-            if (TryAssignScoutPath(player, unit))
-                continue;
-
-            if (unit.Kind == UnitKind.General && TryAssignGeneralRelocationPath(player, unit, target))
-                continue;
-
-            var routeTarget = unitAction.Retreat || MoraleRules.Band(unit.Morale) == MoraleBand.Routed
-                ? ResolveRetreatCity(player, unit)
-                : target;
-
-            AssignPathToTarget(unit, routeTarget);
+            var scout = assigned
+                .Where(unit => unit.Id != protection?.Id)
+                .OrderBy(unit => unit.Kind == UnitKind.Infantry ? 0 : 1)
+                .ThenByDescending(unit => DistanceToNearestForeignCity(player, unit.Cell))
+                .ThenBy(unit => unit.Id)
+                .FirstOrDefault();
+            if (scout != null)
+                scout.IsScout = true;
         }
     }
 
@@ -1221,7 +2455,11 @@ public sealed class GameSimulation
             return;
         }
 
-        var region = CreateRegionSnapshots().First(region => region.PlayerId == player.Id);
+        var region = CreateRegionSnapshots()
+            .Where(region => region.PlayerId == player.Id)
+            .OrderBy(region => region.AssignedCommanderUnitId == commander.Id ? 0 : 1)
+            .ThenBy(region => region.RegionId)
+            .First();
         var action = _commanderController.Decide(new CommanderPerception(
             Tick,
             player.Id,
@@ -1235,6 +2473,7 @@ public sealed class GameSimulation
         if (action.RequestReinforcements || player.HumanControlMode != HumanControlMode.General)
             player.LightPreference = Math.Clamp(action.InfantryPreference, 0.1, 0.95);
         commander.TargetRegionId = action.TargetRegionId;
+        EmitGeneralRegionCommand(player);
         if (player.Kind == PlayerKind.Ai || player.HumanControlMode != HumanControlMode.General)
             AssignSpecialRoles(player, commander, action.RequestReinforcements);
         else
@@ -1256,7 +2495,8 @@ public sealed class GameSimulation
         var assignable = _units
             .Where(unit => UnitParticipates(unit) &&
                 unit.PlayerId == player.Id &&
-                unit.Kind is UnitKind.Infantry or UnitKind.Tank)
+                unit.Kind is UnitKind.Infantry or UnitKind.Tank &&
+                unit.AssignedCommanderUnitId == commander.Id)
             .OrderBy(unit => unit.Cell.OctileDistanceTo(commander.Cell))
             .ThenBy(unit => unit.Id)
             .ToList();
@@ -1297,6 +2537,7 @@ public sealed class GameSimulation
 
         if (unit.Cell.ChebyshevDistanceTo(commander.Cell) <= 1)
         {
+            EmitCommanderUnitCommand(player, unit, DefendCellCommand, unit.Cell, "protection-detail");
             ClearPath(unit, resetVisualState: true);
             return true;
         }
@@ -1309,6 +2550,7 @@ public sealed class GameSimulation
         if (!destination.HasValue)
             return false;
 
+        EmitCommanderUnitCommand(player, unit, DefendCellCommand, destination.Value, "protection-detail");
         AssignPathToCell(unit, destination.Value, player.CommanderCityId);
         return true;
     }
@@ -1322,6 +2564,7 @@ public sealed class GameSimulation
         if (target == null)
             return false;
 
+        EmitCommanderUnitCommand(player, unit, AdvanceToCellCommand, target.GridPosition, "scout");
         AssignPathToTarget(unit, target);
         return true;
     }
@@ -1412,6 +2655,31 @@ public sealed class GameSimulation
             .FirstOrDefault()
             ?? _cities[player.HomeCityId];
     }
+
+    private CityNode? ResolveAttackCityForCommander(PlayerState player, TacticalUnit commander)
+    {
+        if (player.TargetCityId >= 0 &&
+            player.TargetCityId < _cities.Count &&
+            _cities[player.TargetCityId].OwnerId != player.Id)
+        {
+            return _cities[player.TargetCityId];
+        }
+
+        return _cities
+            .Where(city => city.OwnerId != player.Id)
+            .OrderBy(city => city.OwnerId == GameConstants.NeutralPlayerId ? 0 : 1)
+            .ThenBy(city => city.GridPosition.OctileDistanceTo(commander.Cell))
+            .ThenByDescending(city => city.Production)
+            .ThenBy(city => city.Id)
+            .FirstOrDefault();
+    }
+
+    private CityNode? ResolveOwnedCityClosestTo(PlayerState player, GridPoint cell)
+        => _cities
+            .Where(city => city.OwnerId == player.Id)
+            .OrderBy(city => city.GridPosition.OctileDistanceTo(cell))
+            .ThenBy(city => city.Id)
+            .FirstOrDefault();
 
     private CityNode? SelectThreatenedOwnedCity(PlayerState player)
         => _cities
@@ -1638,9 +2906,10 @@ public sealed class GameSimulation
     {
         var unitId = kind == UnitKind.Commander ? player.CommanderUnitId : player.GeneralUnitId;
         if (!unitId.HasValue)
-            return null;
+            return kind == UnitKind.Commander ? GetPlayerCommanders(player.Id).FirstOrDefault() : null;
 
-        return _units.FirstOrDefault(unit => unit.Id == unitId.Value && unit.IsAlive);
+        return _units.FirstOrDefault(unit => unit.Id == unitId.Value && unit.IsAlive) ??
+            (kind == UnitKind.Commander ? GetPlayerCommanders(player.Id).FirstOrDefault() : null);
     }
 
     private void UpdateScores()
@@ -1871,35 +3140,98 @@ public sealed class GameSimulation
             .ToList();
 
     private IReadOnlyList<RegionSnapshot> CreateRegionSnapshots()
-        => _players
-            .OrderBy(player => player.Id)
-            .Select(player =>
+    {
+        var regions = new List<RegionSnapshot>();
+        foreach (var player in _players.OrderBy(player => player.Id))
+        {
+            var assignments = CreateCommanderRegionAssignments(player.Id);
+            if (assignments.Count == 0)
             {
                 var anchorCity = ResolveRegionAnchorCity(player);
-                var cells = _cellControls.Values.Where(cell => cell.OwnerId == player.Id).ToList();
-                var friendly = _units.Count(unit => UnitParticipates(unit) && unit.PlayerId == player.Id);
-                var enemy = _units.Count(unit => UnitParticipates(unit) &&
-                    unit.PlayerId != player.Id &&
-                    unit.Cell.ChebyshevDistanceTo(anchorCity.GridPosition) <= 6);
-                var leaderless = Math.Max(0, player.CommanderLeaderlessUntilTick - Tick);
-                var priority = Math.Clamp(enemy / Math.Max(1.0, friendly) + player.EconomyRisk + (player.GeneralSecurity < 0.5 ? 0.4 : 0), 0, 2);
+                regions.Add(CreateRegionSnapshot(
+                    player.Id,
+                    player,
+                    null,
+                    anchorCity,
+                    0,
+                    0,
+                    _grid.Width,
+                    _grid.Height));
+                continue;
+            }
 
-                return new RegionSnapshot(
-                    player.Id,
-                    player.Id,
-                    player.CommanderUnitId ?? -1,
-                    anchorCity.Id,
-                    cells.Count,
-                    Math.Round(cells.Sum(cell => cell.TaxValue), 2),
-                    friendly,
-                    enemy,
-                    _cities.Count(city => city.OwnerId == player.Id),
-                    player.SpawnCapacity,
-                    Math.Round(player.LastPayrollDeficitRatio, 3),
-                    leaderless,
-                    Math.Round(priority, 3));
-            })
+            foreach (var assignment in assignments)
+            {
+                regions.Add(CreateRegionSnapshot(
+                    assignment.RegionId,
+                    player,
+                    assignment,
+                    ResolveRegionAnchorCity(player),
+                    assignment.BoundsX,
+                    assignment.BoundsY,
+                    assignment.Width,
+                    assignment.Height));
+            }
+        }
+
+        return regions
+            .OrderBy(region => region.PlayerId)
+            .ThenBy(region => region.RegionId)
             .ToList();
+    }
+
+    private RegionSnapshot CreateRegionSnapshot(
+        int regionId,
+        PlayerState player,
+        CommanderRegionAssignment? assignment,
+        CityNode anchorCity,
+        int boundsX,
+        int boundsY,
+        int width,
+        int height)
+    {
+        var cells = _cellControls.Values
+            .Where(cell => cell.OwnerId == player.Id && IsInsideBounds(cell.Point, boundsX, boundsY, width, height))
+            .ToList();
+        var friendly = _units.Count(unit => UnitParticipates(unit) &&
+            unit.PlayerId == player.Id &&
+            IsInsideBounds(unit.Cell, boundsX, boundsY, width, height));
+        var visibleEnemies = _units.Count(unit => UnitParticipates(unit) &&
+            unit.PlayerId != player.Id &&
+            IsInsideBounds(unit.Cell, boundsX, boundsY, width, height) &&
+            IsVisibleTo(player.Id, unit.Cell));
+        var leaderless = Math.Max(0, player.CommanderLeaderlessUntilTick - Tick);
+        var priority = Math.Clamp(visibleEnemies / Math.Max(1.0, friendly) + player.EconomyRisk + (player.GeneralSecurity < 0.5 ? 0.4 : 0), 0, 2);
+
+        return new RegionSnapshot(
+            regionId,
+            player.Id,
+            assignment?.CommanderUnitId ?? player.CommanderUnitId ?? -1,
+            anchorCity.Id,
+            cells.Count,
+            Math.Round(cells.Sum(cell => cell.TaxValue), 2),
+            friendly,
+            visibleEnemies,
+            _cities.Count(city => city.OwnerId == player.Id && IsInsideBounds(city.GridPosition, boundsX, boundsY, width, height)),
+            player.SpawnCapacity,
+            Math.Round(player.LastPayrollDeficitRatio, 3),
+            leaderless,
+            Math.Round(priority, 3),
+            boundsX,
+            boundsY,
+            width,
+            height,
+            assignment?.CommanderUnitId,
+            assignment?.CommanderNumber,
+            visibleEnemies,
+            visibleEnemies > 0);
+    }
+
+    private static bool IsInsideBounds(GridPoint point, int x, int y, int width, int height)
+        => point.X >= x &&
+            point.X < x + width &&
+            point.Y >= y &&
+            point.Y < y + height;
 
     private CityNode ResolveRegionAnchorCity(PlayerState player)
     {
@@ -1930,12 +3262,15 @@ public sealed class GameSimulation
     private bool IsVisibleTo(int playerId, GridPoint cell)
         => _units.Any(unit => UnitParticipates(unit) &&
             unit.PlayerId == playerId &&
-            unit.Cell.ChebyshevDistanceTo(cell) <= VisibilityRadius(unit));
+            CanUnitSee(unit, cell));
 
-    private static int VisibilityRadius(TacticalUnit unit)
+    private static bool CanUnitSee(TacticalUnit unit, GridPoint cell)
+        => unit.Cell.ChebyshevDistanceTo(cell) <= VisibilityRadius(unit);
+
+    internal static int VisibilityRadius(TacticalUnit unit)
         => VisibilityRadius(unit.Kind) + (unit.IsScout ? 2 : 0);
 
-    private static int VisibilityRadius(UnitKind kind)
+    internal static int VisibilityRadius(UnitKind kind)
         => kind switch
         {
             UnitKind.General => 10,
@@ -1964,18 +3299,127 @@ public sealed class GameSimulation
                     IsVisibleTo(player.Id, unit.Cell))
                 .Select(unit => unit.Id)
                 .ToHashSet();
+            var previousVisible = _previousVisibleEnemyUnitIds.TryGetValue(player.Id, out var previous)
+                ? previous
+                : new HashSet<int>();
+            var newContacts = visibleEnemyUnitIds.Except(previousVisible).OrderBy(id => id).ToList();
 
             if (enemyGeneralVisible && (!_previousEnemyGeneralVisible.TryGetValue(player.Id, out var wasVisible) || !wasVisible))
                 AddTelemetry(player.Id, "ScoutDiscovery", "enemy-general");
-            if (_previousVisibleEnemyUnitIds.TryGetValue(player.Id, out var previousVisible))
+            if (_previousVisibleEnemyUnitIds.TryGetValue(player.Id, out var knownPreviousVisible))
             {
-                var lostContacts = previousVisible.Except(visibleEnemyUnitIds).OrderBy(id => id).ToList();
+                var lostContacts = knownPreviousVisible.Except(visibleEnemyUnitIds).OrderBy(id => id).ToList();
                 if (lostContacts.Count > 0)
                     AddTelemetry(player.Id, "ScoutLostContact", $"units={string.Join(",", lostContacts.Take(5))}");
             }
 
+            foreach (var enemyId in newContacts)
+            {
+                var enemy = _units.FirstOrDefault(unit => unit.Id == enemyId);
+                if (enemy != null)
+                    AddEnemySightedReport(player, enemy);
+            }
+
+            if (Tick % PlanningInterval == 0 || newContacts.Count > 0)
+                AddCommanderRegionSummaryReports(player);
+
             _previousEnemyGeneralVisible[player.Id] = enemyGeneralVisible;
             _previousVisibleEnemyUnitIds[player.Id] = visibleEnemyUnitIds;
+        }
+    }
+
+    private void AddEnemySightedReport(PlayerState player, TacticalUnit enemy)
+    {
+        var observer = _units
+            .Where(unit => UnitParticipates(unit) &&
+                unit.PlayerId == player.Id &&
+                CanAssignToCommander(unit) &&
+                unit.AssignedCommanderUnitId.HasValue &&
+                CanUnitSee(unit, enemy.Cell))
+            .OrderBy(unit => unit.Cell.ChebyshevDistanceTo(enemy.Cell))
+            .ThenBy(unit => unit.Id)
+            .FirstOrDefault();
+        if (observer == null)
+            return;
+
+        AddReportRecord(new ReportRecordSnapshot(
+            Tick,
+            player.Id,
+            UnitToCommanderLayer,
+            observer.Id,
+            observer.AssignedCommanderUnitId,
+            observer.AssignedCommanderNumber,
+            EnemySightedReport,
+            enemy.Cell.X,
+            enemy.Cell.Y,
+            enemy.Kind == UnitKind.General ? 1.0 : 0.65,
+            $"enemyUnit={enemy.Id};enemyKind={enemy.Kind}"));
+    }
+
+    private void AddCommanderRegionSummaryReports(PlayerState player)
+    {
+        foreach (var region in CreateRegionSnapshots().Where(region => region.PlayerId == player.Id))
+        {
+            if (!region.AssignedCommanderUnitId.HasValue)
+                continue;
+
+            var assignedUnits = _units
+                .Where(unit => UnitParticipates(unit) &&
+                    unit.PlayerId == player.Id &&
+                    CanAssignToCommander(unit) &&
+                    unit.AssignedCommanderUnitId == region.AssignedCommanderUnitId.Value)
+                .ToList();
+            var lowMoraleCount = assignedUnits.Count(unit => MoraleRules.Band(unit.Morale) is MoraleBand.RoutRisk or MoraleBand.Routed);
+            var tooFewAssignedUnits = assignedUnits.Count == 0;
+            var needsReinforcements =
+                tooFewAssignedUnits ||
+                region.VisibleEnemyUnitCount > assignedUnits.Count ||
+                lowMoraleCount > 0;
+            var reportType = region.Contested ? RegionContestedReport : RegionStableReport;
+            AddReportRecord(new ReportRecordSnapshot(
+                Tick,
+                player.Id,
+                CommanderToGeneralLayer,
+                region.AssignedCommanderUnitId.Value,
+                player.GeneralUnitId,
+                region.AssignedCommanderNumber,
+                reportType,
+                region.BoundsX + region.Width / 2,
+                region.BoundsY + region.Height / 2,
+                region.Contested ? Math.Clamp(region.VisibleEnemyUnitCount / Math.Max(1.0, region.FriendlyUnitCount), 0.25, 1.0) : 0.1,
+                $"region={region.RegionId};visibleEnemies={region.VisibleEnemyUnitCount}"));
+
+            if (needsReinforcements)
+            {
+                AddReportRecord(new ReportRecordSnapshot(
+                    Tick,
+                    player.Id,
+                    CommanderToGeneralLayer,
+                    region.AssignedCommanderUnitId.Value,
+                    player.GeneralUnitId,
+                    region.AssignedCommanderNumber,
+                    NeedReinforcementsReport,
+                    region.BoundsX + region.Width / 2,
+                    region.BoundsY + region.Height / 2,
+                    0.8,
+                    $"region={region.RegionId};assigned={assignedUnits.Count};lowMorale={lowMoraleCount};visibleEnemies={region.VisibleEnemyUnitCount}"));
+            }
+
+            if (lowMoraleCount > 0)
+            {
+                AddReportRecord(new ReportRecordSnapshot(
+                    Tick,
+                    player.Id,
+                    CommanderToGeneralLayer,
+                    region.AssignedCommanderUnitId.Value,
+                    player.GeneralUnitId,
+                    region.AssignedCommanderNumber,
+                    ReserveRecallRequestedReport,
+                    region.BoundsX + region.Width / 2,
+                    region.BoundsY + region.Height / 2,
+                    0.7,
+                    $"region={region.RegionId};lowMorale={lowMoraleCount}"));
+            }
         }
     }
 
@@ -2136,6 +3580,18 @@ public sealed class GameSimulation
     private static double Normalize(double value, double max)
         => Math.Clamp(value / max, 0, 1);
 
+    private static double StableUnitInterval(int seed, int playerId)
+    {
+        unchecked
+        {
+            var hash = 17;
+            hash = hash * 31 + seed;
+            hash = hash * 31 + playerId;
+            hash ^= hash >> 13;
+            return (hash & 0x7fffffff) % 1000 / 999.0;
+        }
+    }
+
     private double MoveStepCost(GridPoint from, GridPoint to)
         => Math.Max(0.1, _grid.MoveCost(to)) * (IsDiagonalStep(from, to) ? DiagonalMoveMultiplier : 1.0);
 
@@ -2249,4 +3705,24 @@ internal static class EnumerableGridPointExtensions
     }
 }
 
-internal sealed record RecentUnitDeath(int Tick, int PlayerId, GridPoint Cell, UnitKind Kind);
+internal sealed record RecentCombatHit(
+    int Tick,
+    int AttackerPlayerId,
+    int AttackerUnitId,
+    int DefenderPlayerId,
+    int DefenderUnitId,
+    UnitKind DefenderKind,
+    GridPoint Cell,
+    double Damage,
+    bool WasFatal);
+
+internal sealed record RecentUnitDeath(int Tick, int UnitId, int PlayerId, GridPoint Cell, UnitKind Kind);
+
+internal sealed record CommanderRegionAssignment(
+    int RegionId,
+    int CommanderUnitId,
+    int? CommanderNumber,
+    int BoundsX,
+    int BoundsY,
+    int Width,
+    int Height);

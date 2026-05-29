@@ -67,6 +67,7 @@ public sealed class UiSmokeTests : IAsyncLifetime
         GameQueryHelpers.StartMatch(_fixture.Context, seed: 31, aiPlayers: 4);
         var game = new GamePage(_fixture.Context);
         game.AssertLoaded(true);
+        GameQueryHelpers.TogglePause(_fixture.Context);
 
         var map = GameQueryHelpers.GetMapState(_fixture.Context);
         var cells = GameQueryHelpers.GetCellControls(_fixture.Context);
@@ -86,6 +87,70 @@ public sealed class UiSmokeTests : IAsyncLifetime
         Assert.True(
             visibleBoundarySamples >= 18,
             $"Expected at least 18 sampled cell-control borders to show player-color pixels, but found {visibleBoundarySamples}. Screenshot: {screenshotPath}");
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void Smoke_UnitMoraleMarkersAreVisibleInScreenshot()
+    {
+        GameQueryHelpers.StartMatch(_fixture.Context, seed: 31, aiPlayers: 4);
+        var game = new GamePage(_fixture.Context);
+        game.AssertLoaded(true);
+        GameQueryHelpers.TogglePause(_fixture.Context);
+
+        var initialDiagnostics = GameQueryHelpers.GetMapVisualDiagnostics(_fixture.Context);
+        var unit = initialDiagnostics.Units.First(unit => unit.PlayerId == GameConstants.HumanPlayerId && !unit.IsLeader);
+        var diagnostics = GameQueryHelpers.SetUnitMorale(_fixture.Context, unit.UnitId, 0.10);
+        var routedUnit = diagnostics.Units.Single(item => item.UnitId == unit.UnitId);
+        var canvas = _fixture.Context.GetElementState("MapCanvas");
+
+        Assert.Equal("Routed", routedUnit.MoraleBand);
+        Assert.Equal("RoutedBrokenRing", routedUnit.VisualState);
+        Assert.True(canvas.Exists, "MapCanvas must be available for screenshot sampling.");
+
+        var screenshotPath = TakeScreenshot("wair_smoke_unit_morale_markers");
+
+        using var bitmap = new System.Drawing.Bitmap(screenshotPath);
+        var mapSurface = FindMapSurfaceBounds(bitmap);
+        var marker = ToMapPixel(routedUnit, canvas.Bounds, mapSurface);
+        var bluePixels = CountNearColorPixels(
+            bitmap,
+            marker.X,
+            marker.Y,
+            radius: 26,
+            System.Drawing.Color.FromArgb(38, 112, 255),
+            tolerance: 105);
+
+        Assert.True(
+            bluePixels >= 8,
+            $"Expected routed morale marker pixels near unit {routedUnit.UnitId}, but found {bluePixels}. Screenshot: {screenshotPath}");
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void Smoke_UnitDeathMarkerIsHiddenInScreenshot()
+    {
+        GameQueryHelpers.StartMatch(_fixture.Context, seed: 31, aiPlayers: 4);
+        var game = new GamePage(_fixture.Context);
+        game.AssertLoaded(true);
+
+        var stepped = GameQueryHelpers.StepUntil(
+            _fixture.Context,
+            "RecentDeathMarker",
+            maxTicks: 900,
+            stepSize: 1);
+        GameQueryHelpers.TogglePause(_fixture.Context);
+        var diagnostics = GameQueryHelpers.GetMapVisualDiagnostics(_fixture.Context);
+        var canvas = _fixture.Context.GetElementState("MapCanvas");
+
+        Assert.True(stepped.Satisfied, stepped.Detail);
+        Assert.NotEmpty(diagnostics.DeathMarkers);
+        Assert.All(diagnostics.DeathMarkers, marker => Assert.Equal("Hidden", marker.MarkerKind));
+        Assert.True(canvas.Exists, "MapCanvas must be available for screenshot sampling.");
+
+        var screenshotPath = TakeScreenshot("wair_smoke_unit_death_marker");
+
+        Assert.True(System.IO.File.Exists(screenshotPath), $"Expected screenshot to be written: {screenshotPath}");
     }
 
     [Fact]
@@ -265,6 +330,58 @@ public sealed class UiSmokeTests : IAsyncLifetime
         }
 
         return false;
+    }
+
+    private static (int X, int Y) ToMapPixel(
+        UnitMapVisualDiagnosticDto unit,
+        ElementBounds canvas,
+        System.Drawing.Rectangle mapSurface)
+    {
+        var scale = mapSurface.Width / (double)Math.Max(1, canvas.Width);
+        var physicalCanvasWidth = canvas.Width * scale;
+        var physicalCanvasHeight = canvas.Height * scale;
+
+        return (
+            (int)Math.Round(mapSurface.X + unit.MarkerX * physicalCanvasWidth),
+            (int)Math.Round(mapSurface.Y + unit.MarkerY * physicalCanvasHeight)
+        );
+    }
+
+    private static (int X, int Y) ToMapPixel(
+        double markerX,
+        double markerY,
+        ElementBounds canvas,
+        System.Drawing.Rectangle mapSurface)
+    {
+        var scale = mapSurface.Width / (double)Math.Max(1, canvas.Width);
+        var physicalCanvasWidth = canvas.Width * scale;
+        var physicalCanvasHeight = canvas.Height * scale;
+
+        return (
+            (int)Math.Round(mapSurface.X + markerX * physicalCanvasWidth),
+            (int)Math.Round(mapSurface.Y + markerY * physicalCanvasHeight)
+        );
+    }
+
+    private static int CountNearColorPixels(
+        System.Drawing.Bitmap bitmap,
+        int centerX,
+        int centerY,
+        int radius,
+        System.Drawing.Color expected,
+        int tolerance)
+    {
+        var count = 0;
+        for (var y = Math.Max(0, centerY - radius); y <= Math.Min(bitmap.Height - 1, centerY + radius); y++)
+        {
+            for (var x = Math.Max(0, centerX - radius); x <= Math.Min(bitmap.Width - 1, centerX + radius); x++)
+            {
+                if (IsNearColor(bitmap.GetPixel(x, y), expected.R, expected.G, expected.B, tolerance))
+                    count++;
+            }
+        }
+
+        return count;
     }
 
     private static bool IsNearPlayerColor(System.Drawing.Color pixel, int playerId)

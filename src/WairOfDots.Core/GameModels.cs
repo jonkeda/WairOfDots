@@ -258,6 +258,7 @@ public sealed class PlayerState
     public bool ScoutDirective { get; set; } = true;
     public StrategyMode StrategyMode { get; set; } = StrategyMode.Advance;
     public int CommanderLeaderlessUntilTick { get; set; }
+    public int NextCommanderNumber { get; set; } = 1;
     public HumanControlMode HumanControlMode { get; set; } = HumanControlMode.General;
     public int ConsecutiveHoldPlans { get; set; }
 }
@@ -280,6 +281,9 @@ public sealed class TacticalUnit
     public int VisualMoveTick { get; set; } = -1;
     public double Health { get; set; }
     public double Morale { get; set; } = 1.0;
+    public int? CommanderNumber { get; set; }
+    public int? AssignedCommanderUnitId { get; set; }
+    public int? AssignedCommanderNumber { get; set; }
     public int? TargetCityId { get; set; }
     public int? TargetRegionId { get; set; }
     public bool IsProtectionDetail { get; set; }
@@ -330,7 +334,14 @@ public sealed record HumanCommand(
     HumanControlMode? ControlMode = null,
     int? TargetRegionId = null,
     int? GeneralRelocationCityId = null,
-    bool? ScoutDirective = null);
+    bool? ScoutDirective = null,
+    int? AssignReserveUnitId = null,
+    int? AssignReserveCommanderUnitId = null,
+    int? AssignReserveGroupCommanderUnitId = null,
+    int? AssignReserveGroupSize = null,
+    int? RecallCommanderUnitId = null,
+    int? RecallCommanderGroupCommanderUnitId = null,
+    int? RecallCommanderGroupSize = null);
 
 public sealed record TerrainPatch(
     int Id,
@@ -393,7 +404,15 @@ public sealed record RegionSnapshot(
     int SpawnCapacity,
     double PayrollPressure,
     int LeaderlessTicksRemaining,
-    double Priority);
+    double Priority,
+    int BoundsX,
+    int BoundsY,
+    int Width,
+    int Height,
+    int? AssignedCommanderUnitId,
+    int? AssignedCommanderNumber,
+    int VisibleEnemyUnitCount,
+    bool Contested);
 
 public sealed record VisibilitySnapshot(
     int PlayerId,
@@ -402,6 +421,55 @@ public sealed record VisibilitySnapshot(
     bool EnemyGeneralVisible,
     IReadOnlyList<int> VisibleEnemyUnitIds);
 
+public sealed record RecentCombatHitSnapshot(
+    int Tick,
+    int AttackerPlayerId,
+    int AttackerUnitId,
+    int DefenderPlayerId,
+    int DefenderUnitId,
+    string DefenderKind,
+    int CellX,
+    int CellY,
+    double Damage,
+    bool WasFatal);
+
+public sealed record RecentUnitDeathSnapshot(
+    int Tick,
+    int UnitId,
+    int PlayerId,
+    string Kind,
+    int CellX,
+    int CellY);
+
+public sealed record CommandRecordSnapshot(
+    int Tick,
+    int PlayerId,
+    string Layer,
+    int SourceUnitId,
+    int? TargetUnitId,
+    int? CommanderNumber,
+    string CommandType,
+    int? TargetCellX,
+    int? TargetCellY,
+    int? TargetCityId,
+    int? TargetRegionId,
+    double Priority,
+    string ReasonCode,
+    bool IsActive);
+
+public sealed record ReportRecordSnapshot(
+    int Tick,
+    int PlayerId,
+    string Layer,
+    int SourceUnitId,
+    int? TargetUnitId,
+    int? CommanderNumber,
+    string ReportType,
+    int? CellX,
+    int? CellY,
+    double Urgency,
+    string Details);
+
 public sealed record CitySnapshot(
     int Id,
     string Name,
@@ -409,7 +477,9 @@ public sealed record CitySnapshot(
     int HumanUnits,
     int EnemyUnits,
     int TotalUnits,
-    IReadOnlyList<int> NeighborIds);
+    IReadOnlyList<int> NeighborIds,
+    string ActiveProductionCommand,
+    string ActiveProductionReason);
 
 public sealed record PlayerSnapshot(
     int Id,
@@ -445,6 +515,16 @@ public sealed record UnitSnapshot(
     double Morale,
     string MoraleBand,
     bool IsLeader,
+    int? CommanderNumber,
+    int? AssignedCommanderUnitId,
+    int? AssignedCommanderNumber,
+    bool IsReserve,
+    string ActiveCommandType,
+    string LatestReportType,
+    IReadOnlyList<int> VisibleEnemyUnitIds,
+    IReadOnlyList<int> AssignedRegionIds,
+    int AssignedUnitCount,
+    bool ReserveUnitsRequested,
     int? TargetCityId,
     int? TargetRegionId,
     int RemainingGridSteps,
@@ -489,7 +569,11 @@ public sealed record MatchSnapshot(
     IReadOnlyList<TerritoryBoundarySegment> TerritoryBoundaries,
     IReadOnlyList<EconomySnapshot> Economies,
     IReadOnlyList<RegionSnapshot> Regions,
-    IReadOnlyList<VisibilitySnapshot> Visibility);
+    IReadOnlyList<VisibilitySnapshot> Visibility,
+    IReadOnlyList<RecentCombatHitSnapshot> RecentCombatHits,
+    IReadOnlyList<RecentUnitDeathSnapshot> RecentDeaths,
+    IReadOnlyList<CommandRecordSnapshot> Commands,
+    IReadOnlyList<ReportRecordSnapshot> Reports);
 
 public static class GameConstants
 {

@@ -7,6 +7,7 @@ These notes are for future coding agents working in this repo. Keep them current
 - Wair of Dots is a single-human, multi-AI tactical game.
 - The main mode is one human player against multiple AI players.
 - AI players should have different NEAT-style controller identities and behavior.
+- Command and information flow should be strict hierarchy: General to Commanders, Commanders to assigned units, and reports upward. Do not add sideways command flow.
 - AI-only mode is important for debugging, training smoke tests, and watching emergent behavior.
 - Oravey may be used only as a Stride and Brinell technical reference. Do not copy Oravey game mechanics, control overlays, or gameplay rules.
 
@@ -16,7 +17,7 @@ These notes are for future coding agents working in this repo. Keep them current
 - Roadmaps go in `.my/roadmap`.
 - Implemented roadmaps can be moved to `.my/roadmap/archive`.
 - RCA docs go in `.my/rca`.
-- Player-facing docs belong in `.my`, such as `.my/HowToPlay.md` and `.my/UAT.md`.
+- Player-facing docs belong in `.my`, such as `.my/HowToPlay.md`, `.my/UAT.md`, and `.my/UnitProperties.md`.
 - `AGENTS.md` is the root exception because coding agents look for it here.
 
 ## Current Implemented Baseline
@@ -32,9 +33,23 @@ These notes are for future coding agents working in this repo. Keep them current
 - Tanks capture their current cell and adjacent passable cells.
 - Players collect tax income, pay upkeep, suffer payroll deficits, and lose morale when unpaid.
 - Production is treasury-funded and spawns units near owned cities.
+- Production is driven by explicit General-to-city commands: `ProduceInfantry`, `ProduceTank`, `ProduceCommander`, and `HoldProduction`.
+- City production commands are emitted as command records in the `GeneralToCity` layer with city ID, unit kind, affordability, and reason codes.
+- Commanders can be produced beside infantry and tanks; Commander cost is `9`, Commander upkeep is `0.9`.
+- Produced Commanders receive the next stable player-local Commander number, start with zero regions and zero assigned units.
+- A later General planning tick assigns rectangular regions to new Commanders.
+- Desired Commander count is `clamp(owned city count, 2, 4)` as a production-policy target.
+- Region assignments are explicit per-player state; starting Commanders get deterministic rectangles, new Commanders start unassigned.
 - AI-only spectator mode exists.
 - Basic Human General and Human Commander mode controls exist.
 - General, Commander, and Unit controller interfaces exist.
+- Each player starts with two Commanders numbered `1` and `2`; Commander numbers are exposed in snapshots/diagnostics and rendered in Commander circles.
+- Starting infantry and tanks are split deterministically between the two starting Commanders; newly produced infantry and tanks start in reserve until the General assigns them.
+- Capped command and report histories are exposed in match snapshots; current planning emits `AttackRegion`/`HoldRegion`, `AdvanceToCell`/`DefendCell`, General reserve commands emit `AssignReserveUnit`, `AssignReserveGroup`, `RecallCommanderUnitToReserve`, and `RecallCommanderGroupToReserve`, and commander pressure emits `CommanderThreatened`.
+- Commanders report `NeedReinforcements` and `ReserveRecallRequested`; only the General executes reserve assignment or recall, including group operations.
+- Simple attack AI is behavior-backed: Generals choose per-Commander objectives, Commanders translate active General commands into orders only for assigned units, reserve units receive no Commander orders, and low morale can override attack orders with retreat/defense.
+- Rectangular Commander regions, visible enemy IDs, active command types, and latest report types are exposed in snapshots; Commander summaries are based on visible enemy pressure.
+- Brinell automation exposes compact command-chain diagnostics grouped by player, Commander, assigned units, active commands, reserve commands, and recent reports.
 - Current AI uses deterministic NEAT-style genome IDs and adapters, not real SharpNEAT evolution.
 - Region, economy, visibility, fitness, telemetry, and cell-control snapshots exist.
 - Territory boundary data exists and is rendered visually.
@@ -81,6 +96,8 @@ Partially implemented:
 
 Still missing or intentionally deferred:
 
+- Richer Commander-to-General flow beyond the first visible-pressure, reinforcement, and reserve-recall summaries.
+- Command icons/pips beyond Commander numbers, assigned-unit numbers, and reserve pips.
 - Actual SharpNEAT package integration and evolutionary training.
 - Dedicated headless training runner project.
 - Saved genomes, model serialization, and ONNX export.
@@ -94,7 +111,8 @@ Still missing or intentionally deferred:
 
 ## Good Next Slices
 
+- Continue from `.my/roadmap/40b-city-commands-commander-production-steps.md` or the next command-and-control slice before expanding the full `.my/roadmap/40-command-information-neat-roadmap.md` catalog.
 - Finish morale/rout behavior with explicit forced retreat, rally, and commander-under-attack penalties.
 - Make commander regions more real: fronts, protection details, and stronger commander-death effects.
-- Decide whether true SharpNEAT is needed now or whether deterministic NEAT-style AI remains the local MVP.
+- Keep deterministic command-and-control as the local MVP path; revisit true SharpNEAT after hierarchy, assignments, and command diagnostics are stable.
 - Add scout role/fog UI only after the desired player information model is clear.

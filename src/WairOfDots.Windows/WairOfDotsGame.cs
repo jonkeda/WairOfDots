@@ -46,6 +46,7 @@ public sealed class WairOfDotsGame : Game
     private TextBlock? _targetText;
     private TextBlock? _lastEventText;
     private TextBlock? _telemetryText;
+    private TextBlock? _overlayText;
     private TextBlock? _endText;
     private TextBlock? _pauseButtonText;
     private TextBlock? _humanToggleText;
@@ -57,8 +58,10 @@ public sealed class WairOfDotsGame : Game
     private ToggleButton? _humanRoleToggle;
     private bool _mapHitTargetsReady;
     private int _selectedTargetCityId;
+    private int? _selectedUnitId;
     private HumanControlMode _selectedHumanControlMode = HumanControlMode.General;
     private double _simulationSpeed = SlowSimulationSpeed;
+    private MapOverlayMode _mapOverlayMode = MapOverlayMode.Normal;
 
     public UIElement? MainUI => _mainUi;
     public GameSimulation Simulation => _simulation;
@@ -136,7 +139,15 @@ public sealed class WairOfDotsGame : Game
                 ? _lastSnapshot.HumanTargetCityId
                 : _selectedTargetCityId;
 
-            _mapRenderer.Draw(GraphicsContext, _simulation, _lastSnapshot, unitPositions, engagedUnitIds, selectedCityId);
+            _mapRenderer.Draw(
+                GraphicsContext,
+                _simulation,
+                _lastSnapshot,
+                unitPositions,
+                engagedUnitIds,
+                selectedCityId,
+                _selectedUnitId,
+                _mapOverlayMode);
         }
     }
 
@@ -155,6 +166,8 @@ public sealed class WairOfDotsGame : Game
                 Mode: parsedMode,
                 HumanControlMode: parsedHumanMode));
             _selectedTargetCityId = 0;
+            _selectedUnitId = null;
+            _mapOverlayMode = MapOverlayMode.Normal;
             _mapHitTargetsReady = false;
             if (_simulation.HasHumanPlayer)
                 _simulation.ApplyHumanCommand(new HumanCommand(TargetCityId: _selectedTargetCityId));
@@ -199,6 +212,34 @@ public sealed class WairOfDotsGame : Game
         }
     }
 
+    internal MapHitResult HitTestMap(double normalizedX, double normalizedY)
+        => MapInteractionService.HitTest(
+            _simulation,
+            ResolveUnitRenderPosition,
+            normalizedX,
+            normalizedY,
+            MapCanvasWidth,
+            MapCanvasHeight);
+
+    internal MapHitResult ClickMap(double normalizedX, double normalizedY)
+    {
+        var hit = HitTestMap(normalizedX, normalizedY);
+        if (hit.Kind == MapHitKind.Unit)
+        {
+            _selectedUnitId = hit.UnitId;
+            RefreshUi();
+        }
+        else if (hit.Kind == MapHitKind.City && hit.CityId.HasValue)
+        {
+            SelectTargetCity(hit.CityId.Value);
+        }
+
+        return hit;
+    }
+
+    internal IReadOnlyList<MapInteractionTarget> CreateMapInteractionTargets()
+        => MapInteractionService.CreateTargets(_simulation, ResolveUnitRenderPosition);
+
     public void SetHumanDirective(PlayerDirective directive)
     {
         lock (_stateLock)
@@ -214,6 +255,7 @@ public sealed class WairOfDotsGame : Game
         lock (_stateLock)
         {
             _selectedTargetCityId = cityId;
+            _selectedUnitId = null;
             if (_simulation.HasHumanPlayer)
                 _simulation.ApplyHumanCommand(new HumanCommand(TargetCityId: cityId));
             RefreshUi();
@@ -248,6 +290,56 @@ public sealed class WairOfDotsGame : Game
         {
             _simulationSpeed = NormalizeSimulationSpeed(speed);
             RefreshUi();
+        }
+    }
+
+    internal MatchSnapshot AssignReserveGroupForHuman(int commanderUnitId, int groupSize)
+    {
+        lock (_stateLock)
+        {
+            if (_simulation.HasHumanPlayer)
+            {
+                _simulation.ApplyHumanCommand(new HumanCommand(
+                    AssignReserveGroupCommanderUnitId: commanderUnitId,
+                    AssignReserveGroupSize: groupSize));
+            }
+
+            RefreshUi();
+            return _lastSnapshot ?? _simulation.CreateSnapshot();
+        }
+    }
+
+    internal MatchSnapshot RecallCommanderGroupForHuman(int commanderUnitId, int groupSize)
+    {
+        lock (_stateLock)
+        {
+            if (_simulation.HasHumanPlayer)
+            {
+                _simulation.ApplyHumanCommand(new HumanCommand(
+                    RecallCommanderGroupCommanderUnitId: commanderUnitId,
+                    RecallCommanderGroupSize: groupSize));
+            }
+
+            RefreshUi();
+            return _lastSnapshot ?? _simulation.CreateSnapshot();
+        }
+    }
+
+    internal MapOverlayMode GetMapOverlayMode()
+    {
+        lock (_stateLock)
+        {
+            return _mapOverlayMode;
+        }
+    }
+
+    internal MapOverlayMode SetMapOverlayMode(MapOverlayMode mode)
+    {
+        lock (_stateLock)
+        {
+            _mapOverlayMode = mode;
+            RefreshUi();
+            return _mapOverlayMode;
         }
     }
 
@@ -382,6 +474,25 @@ public sealed class WairOfDotsGame : Game
         commandPanel.Children.Add(_telemetryText);
         commandPanel.Children.Add(Spacer(8));
 
+        var overlayGroup = new StackPanel
+        {
+            Name = "OverlayToggleGroup",
+            Orientation = Orientation.Vertical
+        };
+        _overlayText = Text("OverlayModeDisplay", "", 13, Color.LightGray);
+        overlayGroup.Children.Add(_overlayText);
+        var overlayRow = new StackPanel { Orientation = Orientation.Horizontal };
+        overlayRow.Children.Add(Button("OverlayNormalButton", "Normal", () => SetMapOverlayMode(MapOverlayMode.Normal)));
+        overlayRow.Children.Add(Button("OverlayEconomyButton", "Economy", () => SetMapOverlayMode(MapOverlayMode.Economy)));
+        overlayRow.Children.Add(Button("OverlayCommandButton", "Command", () => SetMapOverlayMode(MapOverlayMode.Command)));
+        overlayGroup.Children.Add(overlayRow);
+        var overlayRowTwo = new StackPanel { Orientation = Orientation.Horizontal };
+        overlayRowTwo.Children.Add(Button("OverlayVisibilityButton", "Vision", () => SetMapOverlayMode(MapOverlayMode.Visibility)));
+        overlayRowTwo.Children.Add(Button("OverlayAiDebugButton", "AI", () => SetMapOverlayMode(MapOverlayMode.AiDebug)));
+        overlayGroup.Children.Add(overlayRowTwo);
+        commandPanel.Children.Add(overlayGroup);
+        commandPanel.Children.Add(Spacer(6));
+
         _humanCommandPanel = new StackPanel
         {
             Name = "HumanCommandPanel",
@@ -510,9 +621,14 @@ public sealed class WairOfDotsGame : Game
         {
             var selectedCityId = snapshot.HasHumanPlayer ? snapshot.HumanTargetCityId : _selectedTargetCityId;
             var target = snapshot.Cities.FirstOrDefault(c => c.Id == selectedCityId);
-            _targetText.Text = snapshot.HasHumanPlayer
-                ? $"Directive {snapshot.HumanDirective} | Target {target?.Name ?? "None"} | Infantry {snapshot.HumanLightPreference:P0} | Role {humanPlayer?.HumanControlMode ?? "General"}"
-                : $"Spectating {target?.Name ?? "None"} | Owner {OwnerLabel(target?.OwnerId ?? GameConstants.NeutralPlayerId, snapshot.HasHumanPlayer)} | Units {target?.TotalUnits ?? 0}";
+            var selectedUnit = _selectedUnitId.HasValue
+                ? snapshot.Units.FirstOrDefault(unit => unit.Id == _selectedUnitId.Value)
+                : null;
+            _targetText.Text = selectedUnit != null
+                ? FormatSelectedUnitText(selectedUnit, snapshot)
+                : snapshot.HasHumanPlayer
+                    ? $"Directive {snapshot.HumanDirective} | Target {target?.Name ?? "None"} | Infantry {snapshot.HumanLightPreference:P0} | Role {humanPlayer?.HumanControlMode ?? "General"}"
+                    : $"Spectating {target?.Name ?? "None"} | Owner {OwnerLabel(target?.OwnerId ?? GameConstants.NeutralPlayerId, snapshot.HasHumanPlayer)} | Units {target?.TotalUnits ?? 0}";
         }
 
         if (_lastEventText != null)
@@ -526,6 +642,9 @@ public sealed class WairOfDotsGame : Game
                 ? $"AI telemetry pending | {aiStates}"
                 : $"AI telemetry {latest.GenomeId}: {latest.Action} | {aiStates}";
         }
+
+        if (_overlayText != null)
+            _overlayText.Text = $"Overlay {_mapOverlayMode}";
 
         if (_pauseButtonText != null)
             _pauseButtonText.Text = _simulation.Phase == MatchPhase.Paused ? "Resume" : "Pause";
@@ -559,19 +678,58 @@ public sealed class WairOfDotsGame : Game
         var maxCities = Math.Max(1, snapshot.Cities.Count);
         var maxUnits = Math.Max(1, orderedStandings.Max(standing => standing.UnitCount));
         var maxGeneralHealth = TacticalUnit.DefaultHealth(UnitKind.General);
+        var maxResources = Math.Max(1, orderedStandings.Max(standing => Math.Max(0, standing.Resources)));
+        var maxTax = Math.Max(1, orderedStandings.Max(standing => Math.Max(0, standing.TaxIncome)));
+        var maxUpkeep = Math.Max(1, orderedStandings.Max(standing => Math.Max(0, standing.Upkeep)));
+        var maxDeficit = Math.Max(1, orderedStandings.Max(standing => Math.Max(0, standing.PayrollDeficit)));
 
         _standingsPanel.Children.Clear();
         _standingsPanel.Children.Add(Text("StandingsTitle", "Standings", 15, Color.White));
-        _standingsPanel.Children.Add(CreateStandingHeader());
-        foreach (var standing in orderedStandings)
-            _standingsPanel.Children.Add(CreateStandingRow(standing, maxScore, maxCities, maxUnits, maxGeneralHealth));
+        _standingsPanel.Children.Add(CreateStandingSection(
+            "Battlefield",
+            orderedStandings,
+            [
+                new StandingMetricDefinition("Score", "Score", maxScore, standing => standing.Score),
+                new StandingMetricDefinition("Cities", "Cities", maxCities, standing => standing.CityCount),
+                new StandingMetricDefinition("Units", "Units", maxUnits, standing => standing.UnitCount),
+                new StandingMetricDefinition("General", "General", maxGeneralHealth, standing => standing.GeneralHealth)
+            ]));
+        _standingsPanel.Children.Add(CreateStandingSection(
+            "Economy",
+            orderedStandings,
+            [
+                new StandingMetricDefinition("Treasury", "Treasury", maxResources, standing => standing.Resources),
+                new StandingMetricDefinition("Tax", "Tax", maxTax, standing => standing.TaxIncome),
+                new StandingMetricDefinition("Upkeep", "Upkeep", maxUpkeep, standing => standing.Upkeep),
+                new StandingMetricDefinition("PayrollDeficit", "Deficit", maxDeficit, standing => standing.PayrollDeficit)
+            ]));
     }
 
-    private UIElement CreateStandingHeader()
+    private UIElement CreateStandingSection(
+        string sectionName,
+        IReadOnlyList<StandingSnapshot> standings,
+        IReadOnlyList<StandingMetricDefinition> metrics)
+    {
+        var section = new StackPanel
+        {
+            Name = $"Standing{sectionName}Section",
+            Orientation = Orientation.Vertical,
+            Margin = new Thickness(0, sectionName == "Economy" ? 6 : 0, 0, 0)
+        };
+
+        section.Children.Add(CompactText($"Standing{sectionName}Title", sectionName, 10, Color.LightGray));
+        section.Children.Add(CreateStandingHeader(sectionName, metrics));
+        foreach (var standing in standings)
+            section.Children.Add(CreateStandingRow(sectionName, standing, metrics));
+
+        return section;
+    }
+
+    private UIElement CreateStandingHeader(string sectionName, IReadOnlyList<StandingMetricDefinition> metrics)
     {
         var row = new StackPanel
         {
-            Name = "StandingHeaderRow",
+            Name = $"Standing{sectionName}HeaderRow",
             Orientation = Orientation.Horizontal,
             MinimumHeight = 18,
             MaximumHeight = 18,
@@ -584,10 +742,8 @@ public sealed class WairOfDotsGame : Game
             MinimumWidth = 20,
             MaximumWidth = 20
         });
-        row.Children.Add(CreateStandingMetricHeader("Score", "Score"));
-        row.Children.Add(CreateStandingMetricHeader("Cities", "Cities"));
-        row.Children.Add(CreateStandingMetricHeader("Units", "Units"));
-        row.Children.Add(CreateStandingMetricHeader("General", "General"));
+        foreach (var metric in metrics)
+            row.Children.Add(CreateStandingMetricHeader(metric.Name, metric.Label));
 
         return row;
     }
@@ -608,11 +764,9 @@ public sealed class WairOfDotsGame : Game
     }
 
     private UIElement CreateStandingRow(
+        string sectionName,
         StandingSnapshot standing,
-        double maxScore,
-        double maxCities,
-        double maxUnits,
-        double maxGeneralHealth)
+        IReadOnlyList<StandingMetricDefinition> metrics)
     {
         var playerColor = PlayerColor(standing.PlayerId);
         var textColor = standing.IsEliminated ? new Color(132, 136, 142, 255) : playerColor;
@@ -620,22 +774,26 @@ public sealed class WairOfDotsGame : Game
 
         var row = new StackPanel
         {
-            Name = $"StandingRow_{standing.PlayerId}",
+            Name = $"Standing{sectionName}Row_{standing.PlayerId}",
             Orientation = Orientation.Horizontal,
             MinimumHeight = 28,
             MaximumHeight = 30,
             Margin = new Thickness(0, 2, 0, 2)
         };
 
-        var dot = CompactText($"StandingPlayerDot_{standing.PlayerId}", "●", 12, playerColor);
+        var dot = CompactText($"Standing{sectionName}PlayerDot_{standing.PlayerId}", "●", 12, playerColor);
         dot.MinimumWidth = 20;
         dot.MaximumWidth = 20;
         row.Children.Add(dot);
 
-        row.Children.Add(CreateStandingMetric("Score", standing.PlayerId, standing.Score, maxScore, fillColor, textColor));
-        row.Children.Add(CreateStandingMetric("Cities", standing.PlayerId, standing.CityCount, maxCities, fillColor, textColor));
-        row.Children.Add(CreateStandingMetric("Units", standing.PlayerId, standing.UnitCount, maxUnits, fillColor, textColor));
-        row.Children.Add(CreateStandingMetric("General", standing.PlayerId, standing.GeneralHealth, maxGeneralHealth, fillColor, textColor));
+        foreach (var metric in metrics)
+            row.Children.Add(CreateStandingMetric(
+                metric.Name,
+                standing.PlayerId,
+                metric.Value(standing),
+                metric.MaxValue,
+                fillColor,
+                textColor));
 
         return row;
     }
@@ -708,10 +866,10 @@ public sealed class WairOfDotsGame : Game
             var rel = ToMapRelative(city.Position);
             var button = new Button
             {
-                Name = $"MapCity_{city.Id}",
+                Name = $"MapHitCity_{city.Id}",
                 Content = new TextBlock
                 {
-                    Name = $"MapCityHitLabel_{city.Id}",
+                    Name = $"MapHitCityLabel_{city.Id}",
                     Text = string.Empty,
                     Font = _font,
                     TextColor = Color.Transparent
@@ -907,6 +1065,30 @@ public sealed class WairOfDotsGame : Game
                     unit.IsUsingSmoothedSegment);
             })
             .ToList();
+
+    internal MapVisualDiagnostics CreateMapVisualDiagnostics()
+    {
+        var snapshot = _lastSnapshot ?? _simulation.CreateSnapshot();
+        return MapVisualDiagnosticsService.Create(
+            _simulation,
+            snapshot,
+            ResolveUnitRenderPosition,
+            _selectedUnitId,
+            MapCanvasHeight,
+            _mapOverlayMode);
+    }
+
+    internal MapVisualDiagnostics SetUnitMoraleForDiagnostics(int unitId, double morale)
+    {
+        var unit = _simulation.Units.FirstOrDefault(unit => unit.Id == unitId && unit.IsAlive);
+        if (unit != null)
+        {
+            unit.Morale = MoraleRules.Clamp(morale);
+            _lastSnapshot = _simulation.CreateSnapshot();
+        }
+
+        return CreateMapVisualDiagnostics();
+    }
 
     private MapPoint ResolveUnitRenderPosition(TacticalUnit unit)
         => unit.VisualMoveTick == _simulation.Tick && unit.HasVisualMovement
@@ -1205,6 +1387,71 @@ public sealed class WairOfDotsGame : Game
             HumanControlMode.DotChaos => "Dot Chaos",
             _ => mode.ToString()
         };
+
+    private sealed record StandingMetricDefinition(
+        string Name,
+        string Label,
+        double MaxValue,
+        Func<StandingSnapshot, double> Value);
+
+    private static string FormatSelectedUnitText(UnitSnapshot unit, MatchSnapshot snapshot)
+    {
+        var kind = Enum.TryParse<UnitKind>(unit.Kind, ignoreCase: true, out var parsedKind)
+            ? parsedKind
+            : UnitKind.Infantry;
+        var maxHealth = TacticalUnit.DefaultHealth(kind);
+        var common = $"Selected {OwnerLabel(unit.PlayerId, snapshot.HasHumanPlayer)} {unit.Kind} #{unit.Id} | HP {unit.Health:F0}/{maxHealth:F0} | Morale {unit.MoraleBand} {unit.Morale:P0}";
+        var command = FormatActiveCommand(unit, snapshot);
+        var report = string.IsNullOrWhiteSpace(unit.LatestReportType) ? "None" : unit.LatestReportType;
+
+        if (kind == UnitKind.General)
+        {
+            var commanderCommands = snapshot.Commands
+                .Where(command => command.PlayerId == unit.PlayerId && command.Layer == "GeneralToCommander" && command.IsActive)
+                .Select(command => $"{command.CommandType}:C{command.CommanderNumber?.ToString() ?? "?"}->{FormatCommandTarget(command)}")
+                .DefaultIfEmpty("None");
+            var reserveCommands = snapshot.Commands
+                .Where(command => command.PlayerId == unit.PlayerId && command.Layer == "GeneralToReserve" && command.IsActive)
+                .Select(command => $"{command.CommandType}:U{command.TargetUnitId?.ToString() ?? "?"}")
+                .DefaultIfEmpty("None");
+
+            return $"{common} | Commander commands {string.Join(",", commanderCommands)} | Reserve {string.Join(",", reserveCommands)}";
+        }
+
+        if (kind == UnitKind.Commander)
+        {
+            var regions = unit.AssignedRegionIds.Count == 0 ? "None" : string.Join(",", unit.AssignedRegionIds);
+            return $"{common} | Commander {unit.CommanderNumber?.ToString() ?? "?"} | Regions {regions} | Assigned units {unit.AssignedUnitCount} | Reserve requested {unit.ReserveUnitsRequested} | Command {command} | Report {report}";
+        }
+
+        var assignment = unit.IsReserve
+            ? "Reserve"
+            : unit.AssignedCommanderNumber.HasValue ? $"Commander {unit.AssignedCommanderNumber.Value}" : "Unassigned";
+        return $"{common} | Assignment {assignment} | Command {command} | Report {report} | Visible enemies {unit.VisibleEnemyUnitIds.Count}";
+    }
+
+    private static string FormatActiveCommand(UnitSnapshot unit, MatchSnapshot snapshot)
+    {
+        var command = snapshot.Commands
+            .Where(command => command.IsActive && command.PlayerId == unit.PlayerId && command.TargetUnitId == unit.Id)
+            .OrderByDescending(command => command.Tick)
+            .ThenBy(command => command.Layer)
+            .FirstOrDefault();
+        return command == null
+            ? "None"
+            : $"{command.CommandType}->{FormatCommandTarget(command)}";
+    }
+
+    private static string FormatCommandTarget(CommandRecordSnapshot command)
+    {
+        if (command.TargetCityId.HasValue)
+            return $"City {command.TargetCityId.Value}";
+        if (command.TargetCellX.HasValue && command.TargetCellY.HasValue)
+            return $"{command.TargetCellX.Value},{command.TargetCellY.Value}";
+        if (command.TargetRegionId.HasValue)
+            return $"Region {command.TargetRegionId.Value}";
+        return "None";
+    }
 
     private static string OwnerLabel(int ownerId, bool hasHumanPlayer)
         => ownerId switch

@@ -39,7 +39,7 @@ Uncheck `Human` on the start menu to watch an AI-only match. Player `0` becomes 
 
 AI-only mode replaces human command buttons with speed controls and standings. City markers inspect cities instead of issuing orders.
 
-Standings show each AI as a compact row of bars for score, cities, units, and general health. Labels above the columns identify the metrics, each player row starts with a colored dot, and the raw numbers stay visible above the bars.
+Standings split each AI into two comparison bands: battlefield bars for score, cities, units, and general health, plus economy bars for treasury, tax, upkeep, and deficit. Labels above the columns identify the metrics, each player row starts with a colored dot, and the raw numbers stay visible above the bars. See `StandingsPanel.md` for the full reading guide.
 
 Use:
 

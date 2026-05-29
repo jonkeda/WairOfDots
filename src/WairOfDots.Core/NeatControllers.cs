@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text;
 
 namespace WairOfDots.Core;
 
@@ -109,7 +110,7 @@ public sealed class GenomeNeatController : IAiController
         var archetypes = new[] { "rush", "turtle", "opportunist", "decap" };
         var archetypeIndex = playerId <= 0 ? 0 : (playerId - 1) % archetypes.Length;
         var archetype = archetypes[archetypeIndex];
-        var rng = new Random(HashCode.Combine(seed, playerId, archetype));
+        var rng = new Random(StableSeed(seed, playerId, archetype));
         var weights = Enumerable.Range(0, 10).Select(_ => rng.NextDouble() * 2 - 1).ToArray();
 
         var (enemy, neutral, distance) = archetype switch
@@ -186,4 +187,17 @@ public sealed class GenomeNeatController : IAiController
 
     private static double Sigmoid(double value)
         => 1.0 / (1.0 + Math.Exp(-value));
+
+    private static int StableSeed(int seed, int playerId, string archetype)
+    {
+        unchecked
+        {
+            var hash = 17;
+            hash = hash * 31 + seed;
+            hash = hash * 31 + playerId;
+            foreach (var value in Encoding.UTF8.GetBytes(archetype))
+                hash = hash * 31 + value;
+            return hash;
+        }
+    }
 }

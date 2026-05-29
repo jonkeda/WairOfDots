@@ -86,7 +86,13 @@ Overall prompt coverage is roughly 60 percent if weighted against the full ambit
 - [ ] Separate LightUnitNet and HeavyUnitNet.
 - [ ] Commander net and General net.
 - [ ] Four-tier General -> Commander -> Unit Nets -> Dots neural hierarchy.
+- [~] Strict vertical command/report hierarchy between tiers, with no sideways command flow.
 - [ ] Full upward/downward information flow between tiers.
+- [x] Multiple per-player Commanders with stable visible Commander numbers.
+- [x] Reserve unit and group assignment and reserve recall by the General.
+- [x] Rectangular regions with zero or more regions assigned per Commander.
+- [ ] Commander production beside infantry and tank production.
+- [ ] Compact command visualization through Commander numbers, reserve pips, and command icons/pips.
 - [ ] Commander protection detail size and assignment.
 - [ ] Dedicated scout unit role.
 - [ ] Scout roles.
@@ -109,6 +115,21 @@ Keep these constraints:
 - [X] Keep Brinell coverage for UI behavior.
 - [X] Keep pure core simulation tests for game rules.
 - [X] Keep `.my` as the home for future docs and roadmaps.
+
+Current command-and-control direction:
+
+- Build deterministic command-and-control before real NEAT integration.
+- Use strict hierarchy: General to Commanders, Commanders to assigned units, reports upward only.
+- Give each Commander a stable player-local number starting at `1`.
+- Show Commander numbers in Commander circles and assigned-unit circles.
+- Treat unassigned units as reserve.
+- Let the General assign reserve units to Commanders.
+- Let the General recall assigned units back to reserve.
+- Let Commanders request recall through reports, but not execute recall directly.
+- Use rectangular regions, with zero or more regions assigned per Commander.
+- Add Commander production beside infantry and tank production.
+- Prefer compact unit/Commander icons, center labels, and pips over always-visible command lines.
+- Track the detailed plan in [40-command-information-neat-roadmap.md](40-command-information-neat-roadmap.md).
 
 ## Completed Foundation: Prompt Contract Baseline
 
@@ -173,7 +194,9 @@ Keep these constraints:
 ## Phase 04: Commander Regions
 
 - [~] Partition the map into regions or fronts.
+- [ ] Replace or extend current region snapshots with deterministic rectangular regions.
 - [x] Assign each commander to a region.
+- [ ] Allow each Commander to have zero or more assigned rectangular regions.
 - [x] Track region control, friendly/enemy unit count, city control, and border pressure.
 - [x] Give each commander a region-local target and directive.
 - [x] Add leaderless window when a commander dies.
@@ -183,16 +206,23 @@ Keep these constraints:
 ## Phase 05: Resource Budgets And Replenishment
 
 - [~] Add reserve pool separate from city production.
+- [ ] Treat unassigned units as reserve in snapshots, AI observations, and map visualization.
+- [ ] Let the General assign reserve units to Commanders.
+- [ ] Let the General recall assigned units back to reserve.
+- [ ] Let Commanders request reserve recall through reports, without changing assignments directly.
 - [x] Add commander replenishment requests.
 - [x] Add General budget allocation across commanders.
 - [~] Add unit type preference per commander.
 - [~] Add emergency replenishment behavior.
 - [x] Keep the current human infantry/tank preference as a temporary General-level control until the budget UI replaces it.
+- [ ] Add Commander production beside infantry and tank production.
 
 ## Phase 06: General Strategy Layer
 
 - [x] Build a General perception with per-commander status, map control, reserves, time pressure, and General security.
 - [x] Build General directives for region priority, resource budget, troop assignment, and strategic pause/rebuild mode.
+- [ ] Make General-to-Commander, General-to-reserve, General-to-city, Commander-to-unit, unit-to-Commander, and Commander-to-General records explicit.
+- [ ] Enforce one active executable command per Commander and per unit before considering queues or multiple simultaneous commands.
 - [~] Allow the human General to set commander/region priorities rather than only one global target city.
 - [ ] Add General relocation as a controlled action.
 - [x] Add General security level and threat detection.
@@ -234,12 +264,20 @@ Keep these constraints:
 
 ## Suggested Next Slice
 
-Start by finishing the partially implemented prompt systems:
+Start by making command-and-control explicit:
+
+- Continue from [40b-city-commands-commander-production-steps.md](40b-city-commands-commander-production-steps.md) or the next focused command-and-control slice; `40a`, `40c`, and `40d` now cover the first vision, hierarchy, attack-order, and reserve-command baseline.
+- Keep [40-command-information-neat-roadmap.md](40-command-information-neat-roadmap.md) as the full command catalog and later expansion plan.
+- Use the current vision model explicitly: infantry `5`, tank `6`, Commander `8`, General `10`, scout bonus `+2`, using Chebyshev distance.
+- Keep command visualization compact with Commander numbers, reserve pips, and command pips/icons. Use lines only for selected/debug overlays.
+- Keep real SharpNEAT deferred until deterministic hierarchy, assignments, and command diagnostics are stable.
+
+Then continue the partially implemented prompt systems:
 
 - Finish Phase 03 morale/rout with explicit commander-under-attack penalties, forced retreat tests, and rally behavior.
 - Finish Phase 04 commander regions with real front partitioning and protection detail assignments.
 - Finish Phase 07 visibility/scouting with a dedicated scout role and player-facing fog rules if desired.
-- Decide whether Phase 08 should use true SharpNEAT now or keep deterministic training smoke until the gameplay loop is more stable.
+- Revisit whether Phase 08 should use true SharpNEAT after the deterministic command model is stable.
 
 This keeps the game playable while moving toward the original prompt's architecture without turning the next slice into a research project.
 
@@ -254,6 +292,7 @@ This keeps the game playable while moving toward the original prompt's architect
 
 - [x] Should `Infantry/Tank` remain the code names, or should code and UI move to `Light/Heavy`?
 - [x] Should city capacity attrition be revived, or is single-cell grid occupancy the replacement?
-- [ ] Should true SharpNEAT be mandatory, or is deterministic NEAT-style AI acceptable for the local MVP?
+- [x] Should true SharpNEAT be mandatory, or is deterministic NEAT-style AI acceptable for the local MVP?
+  Answer: deterministic command-and-control and deterministic NEAT-style AI are acceptable for the local MVP. True SharpNEAT remains a later replacement or upgrade.
 - [~] Should human Commander/Dot modes be first-class goals or later experiments?
 - [ ] Should LLM controllers be part of this project now, or only a future adapter behind controller interfaces?

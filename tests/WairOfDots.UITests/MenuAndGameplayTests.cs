@@ -38,7 +38,11 @@ public sealed class MenuAndGameplayTests : IAsyncLifetime
         game.Score.AssertTextContains("Human score");
         game.Score.AssertTextContains("Treasury");
         game.Score.AssertTextContains("Tax");
-        Assert.True(game.MapCity(0).IsVisible());
+        var city = GameQueryHelpers.GetMapInteractionTargets(_fixture.Context)
+            .Single(target => target.Kind == "City" && target.Id == 0);
+        var hit = GameQueryHelpers.HitTestMap(_fixture.Context, city.NormalizedX, city.NormalizedY);
+        Assert.Equal("City", hit.Kind);
+        Assert.Equal(0, hit.CityId);
     }
 
     [Fact]
@@ -111,8 +115,9 @@ public sealed class MenuAndGameplayTests : IAsyncLifetime
     [Fact]
     public void EconomyAndVisibilityDiagnostics_AreExposedThroughBrinellQueries()
     {
-        var snapshot = GameQueryHelpers.StartAiOnly(_fixture.Context, seed: 31, aiPlayers: 4);
+        GameQueryHelpers.StartAiOnly(_fixture.Context, seed: 31, aiPlayers: 4);
         GameQueryHelpers.StepTicks(_fixture.Context, 12);
+        var afterPlanning = GameQueryHelpers.GetSnapshot(_fixture.Context);
 
         var cells = GameQueryHelpers.GetCellControls(_fixture.Context);
         var economies = GameQueryHelpers.GetEconomies(_fixture.Context);
@@ -125,9 +130,9 @@ public sealed class MenuAndGameplayTests : IAsyncLifetime
         Assert.Equal(map.ControlledCellCount, cells.Count);
         Assert.True(map.TerritoryBoundaryCount > 0);
         Assert.True(boundaries.Count > 0);
-        Assert.Equal(snapshot.Players.Count, economies.Count);
-        Assert.Equal(snapshot.Players.Count, regions.Count);
-        Assert.Equal(snapshot.Players.Count, visibility.Count);
+        Assert.Equal(afterPlanning.Players.Count, economies.Count);
+        Assert.Equal(afterPlanning.Units.Count(unit => unit.Kind == "Commander"), regions.Count);
+        Assert.Equal(afterPlanning.Players.Count, visibility.Count);
         Assert.All(economies, economy => Assert.True(economy.ControlledCellCount >= 0));
         Assert.Equal(4, training.Count);
     }
@@ -162,39 +167,153 @@ public sealed class MenuAndGameplayTests : IAsyncLifetime
         var diagnostics = GameQueryHelpers.GetUiDiagnostics(_fixture.Context);
         var expectedOrder = snapshot.Standings.ToList();
         var visibleElementNames = diagnostics.VisibleElementNames.ToList();
-        var rowIndices = expectedOrder
-            .Select(standing => visibleElementNames.IndexOf($"StandingRow_{standing.PlayerId}"))
+        var battlefieldRowIndices = expectedOrder
+            .Select(standing => visibleElementNames.IndexOf($"StandingBattlefieldRow_{standing.PlayerId}"))
+            .ToList();
+        var economyRowIndices = expectedOrder
+            .Select(standing => visibleElementNames.IndexOf($"StandingEconomyRow_{standing.PlayerId}"))
             .ToList();
 
         Assert.True(game.StandingsPanel.IsVisible());
-        Assert.Contains(diagnostics.VisibleElementNames, name => name == "StandingHeaderRow");
+        Assert.Contains(diagnostics.VisibleElementNames, name => name == "StandingBattlefieldSection");
+        Assert.Contains(diagnostics.VisibleElementNames, name => name == "StandingEconomySection");
+        Assert.Contains(diagnostics.VisibleElementNames, name => name == "StandingBattlefieldHeaderRow");
         Assert.Contains(diagnostics.VisibleElementNames, name => name == "StandingScoreHeaderLabel");
         Assert.Contains(diagnostics.VisibleElementNames, name => name == "StandingCitiesHeaderLabel");
         Assert.Contains(diagnostics.VisibleElementNames, name => name == "StandingUnitsHeaderLabel");
         Assert.Contains(diagnostics.VisibleElementNames, name => name == "StandingGeneralHeaderLabel");
+        Assert.Contains(diagnostics.VisibleElementNames, name => name == "StandingEconomyHeaderRow");
+        Assert.Contains(diagnostics.VisibleElementNames, name => name == "StandingTreasuryHeaderLabel");
+        Assert.Contains(diagnostics.VisibleElementNames, name => name == "StandingTaxHeaderLabel");
+        Assert.Contains(diagnostics.VisibleElementNames, name => name == "StandingUpkeepHeaderLabel");
+        Assert.Contains(diagnostics.VisibleElementNames, name => name == "StandingPayrollDeficitHeaderLabel");
         Assert.Contains(diagnostics.VisibleTexts, text => text == "Score");
         Assert.Contains(diagnostics.VisibleTexts, text => text == "Cities");
         Assert.Contains(diagnostics.VisibleTexts, text => text == "Units");
         Assert.Contains(diagnostics.VisibleTexts, text => text == "General");
-        Assert.All(rowIndices, index => Assert.True(index >= 0));
-        Assert.Equal(rowIndices.OrderBy(index => index).ToList(), rowIndices);
+        Assert.Contains(diagnostics.VisibleTexts, text => text == "Treasury");
+        Assert.Contains(diagnostics.VisibleTexts, text => text == "Tax");
+        Assert.Contains(diagnostics.VisibleTexts, text => text == "Upkeep");
+        Assert.Contains(diagnostics.VisibleTexts, text => text == "Deficit");
+        Assert.All(battlefieldRowIndices, index => Assert.True(index >= 0));
+        Assert.All(economyRowIndices, index => Assert.True(index >= 0));
+        Assert.Equal(battlefieldRowIndices.OrderBy(index => index).ToList(), battlefieldRowIndices);
+        Assert.Equal(economyRowIndices.OrderBy(index => index).ToList(), economyRowIndices);
+        Assert.True(visibleElementNames.IndexOf("StandingEconomySection") > visibleElementNames.IndexOf("StandingBattlefieldSection"));
         Assert.DoesNotContain(diagnostics.VisibleElementNames, name => name.StartsWith("StandingLabelColumn_", StringComparison.Ordinal));
         Assert.DoesNotContain(diagnostics.VisibleElementNames, name => name.StartsWith("StandingStatus_", StringComparison.Ordinal));
+        Assert.DoesNotContain(diagnostics.VisibleElementNames, name => name.StartsWith("StandingSummaryRow_", StringComparison.Ordinal));
         Assert.DoesNotContain(diagnostics.VisibleTexts, text => text == "in" || text == "out");
 
         foreach (var standing in expectedOrder)
         {
             Assert.DoesNotContain(diagnostics.VisibleTexts, text => text == standing.Name);
-            Assert.Contains(diagnostics.VisibleElementNames, name => name == $"StandingPlayerDot_{standing.PlayerId}");
+            Assert.Contains(diagnostics.VisibleElementNames, name => name == $"StandingBattlefieldPlayerDot_{standing.PlayerId}");
+            Assert.Contains(diagnostics.VisibleElementNames, name => name == $"StandingEconomyPlayerDot_{standing.PlayerId}");
+            Assert.Contains(diagnostics.VisibleElementNames, name => name == $"StandingBattlefieldRow_{standing.PlayerId}");
+            Assert.Contains(diagnostics.VisibleElementNames, name => name == $"StandingEconomyRow_{standing.PlayerId}");
             Assert.Contains(diagnostics.VisibleElementNames, name => name == $"StandingScoreBar_{standing.PlayerId}");
             Assert.Contains(diagnostics.VisibleElementNames, name => name == $"StandingCitiesBar_{standing.PlayerId}");
             Assert.Contains(diagnostics.VisibleElementNames, name => name == $"StandingUnitsBar_{standing.PlayerId}");
             Assert.Contains(diagnostics.VisibleElementNames, name => name == $"StandingGeneralBar_{standing.PlayerId}");
+            Assert.Contains(diagnostics.VisibleElementNames, name => name == $"StandingTreasuryBar_{standing.PlayerId}");
+            Assert.Contains(diagnostics.VisibleElementNames, name => name == $"StandingTaxBar_{standing.PlayerId}");
+            Assert.Contains(diagnostics.VisibleElementNames, name => name == $"StandingUpkeepBar_{standing.PlayerId}");
+            Assert.Contains(diagnostics.VisibleElementNames, name => name == $"StandingPayrollDeficitBar_{standing.PlayerId}");
             Assert.Contains(diagnostics.VisibleTexts, text => text == $"{standing.Score:F0}");
             Assert.Contains(diagnostics.VisibleTexts, text => text == $"{standing.CityCount:F0}");
             Assert.Contains(diagnostics.VisibleTexts, text => text == $"{standing.UnitCount:F0}");
             Assert.Contains(diagnostics.VisibleTexts, text => text == $"{standing.GeneralHealth:F0}");
+            Assert.Contains(diagnostics.VisibleTexts, text => text == $"{standing.Resources:F0}");
+            Assert.Contains(diagnostics.VisibleTexts, text => text == $"{standing.TaxIncome:F0}");
+            Assert.Contains(diagnostics.VisibleTexts, text => text == $"{standing.Upkeep:F0}");
+            Assert.Contains(diagnostics.VisibleTexts, text => text == $"{standing.PayrollDeficit:F0}");
         }
+    }
+
+    [Fact]
+    public void OverlayToggleGroup_ChangesMapOverlayDiagnostics()
+    {
+        GameQueryHelpers.StartMatch(_fixture.Context, seed: 31, aiPlayers: 4);
+        var game = new GamePage(_fixture.Context);
+        game.AssertLoaded(true);
+
+        Assert.True(game.OverlayToggleGroup.IsVisible());
+        Assert.True(game.OverlayEconomyButton.IsVisible());
+        Assert.Equal("Normal", GameQueryHelpers.GetMapOverlay(_fixture.Context).Mode);
+        var normalDiagnostics = GameQueryHelpers.GetMapVisualDiagnostics(_fixture.Context);
+        Assert.Equal("Normal", normalDiagnostics.OverlayMode);
+        Assert.False(normalDiagnostics.EconomyOverlay.IsVisible);
+        Assert.Empty(normalDiagnostics.EconomyOverlay.TaxHeatCells);
+
+        game.OverlayEconomyButton.Click();
+        game.OverlayMode.AssertTextContains("Economy");
+        var economyOverlay = GameQueryHelpers.GetMapOverlay(_fixture.Context);
+        var economyDiagnostics = GameQueryHelpers.GetMapVisualDiagnostics(_fixture.Context);
+
+        Assert.Equal("Economy", economyOverlay.Mode);
+        Assert.Equal("Economy", economyDiagnostics.OverlayMode);
+        Assert.True(economyDiagnostics.EconomyOverlay.IsVisible);
+        Assert.True(economyDiagnostics.EconomyOverlay.MaxTaxValue >= 8);
+        Assert.NotEmpty(economyDiagnostics.EconomyOverlay.TaxHeatCells);
+        Assert.NotEmpty(economyDiagnostics.EconomyOverlay.SpawnCapacity);
+        Assert.Equal(economyDiagnostics.EconomyOverlay.PayrollStress.Count, economyDiagnostics.EconomyOverlay.PayrollStress.Select(stress => stress.PlayerId).Distinct().Count());
+        Assert.All(economyDiagnostics.EconomyOverlay.TaxHeatCells, cell => Assert.InRange(cell.HeatRatio, 0, 1));
+        Assert.All(economyDiagnostics.EconomyOverlay.SpawnCapacity, city => Assert.True(city.Capacity >= 0));
+
+        GameQueryHelpers.StepTicks(_fixture.Context, 24);
+        var afterCaptures = GameQueryHelpers.GetMapVisualDiagnostics(_fixture.Context);
+        Assert.True(afterCaptures.EconomyOverlay.IsVisible);
+        Assert.All(afterCaptures.EconomyOverlay.TerritorySwings, swing => Assert.InRange(swing.AgeTicks, 0, 8));
+
+        game.OverlayCommandButton.Click();
+        Assert.Equal("Command", GameQueryHelpers.GetMapOverlay(_fixture.Context).Mode);
+        game.OverlayVisibilityButton.Click();
+        Assert.Equal("Visibility", GameQueryHelpers.GetMapOverlay(_fixture.Context).Mode);
+        game.OverlayAiDebugButton.Click();
+        Assert.Equal("AiDebug", GameQueryHelpers.GetMapOverlay(_fixture.Context).Mode);
+        game.OverlayNormalButton.Click();
+        Assert.Equal("Normal", GameQueryHelpers.GetMapOverlay(_fixture.Context).Mode);
+    }
+
+    [Fact]
+    public void AiOnly_EconomyStandingsAndOverlayControls_DoNotOverlapHudLayout()
+    {
+        GameQueryHelpers.StartAiOnly(_fixture.Context, seed: 31, aiPlayers: 4);
+        var game = new GamePage(_fixture.Context);
+        game.AssertLoaded(true);
+
+        var commandPanel = _fixture.Context.GetElementState("CommandPanel");
+        var mapCanvas = _fixture.Context.GetElementState("MapCanvas");
+        var overlayGroup = _fixture.Context.GetElementState("OverlayToggleGroup");
+        var standingsPanel = _fixture.Context.GetElementState("StandingsPanel");
+        var diagnostics = GameQueryHelpers.GetUiDiagnostics(_fixture.Context);
+
+        Assert.True(commandPanel.Exists);
+        Assert.True(mapCanvas.Exists);
+        Assert.True(overlayGroup.Exists);
+        Assert.True(standingsPanel.Exists);
+        Assert.True(overlayGroup.IsVisible);
+        Assert.True(standingsPanel.IsVisible);
+        Assert.False(mapCanvas.Bounds.IsEmpty);
+        Assert.False(overlayGroup.Bounds.IsEmpty);
+        Assert.False(standingsPanel.Bounds.IsEmpty);
+        Assert.Contains(diagnostics.VisibleElementNames, name => name == "OverlayToggleGroup");
+        Assert.Contains(diagnostics.VisibleElementNames, name => name == "StandingBattlefieldSection");
+        Assert.Contains(diagnostics.VisibleElementNames, name => name == "StandingEconomySection");
+        Assert.Contains(diagnostics.VisibleElementNames, name => name == "StandingTreasuryBar_0");
+        Assert.Contains(diagnostics.VisibleElementNames, name => name == "StandingTaxBar_0");
+        Assert.Contains(diagnostics.VisibleElementNames, name => name == "StandingUpkeepBar_0");
+        Assert.Contains(diagnostics.VisibleElementNames, name => name == "StandingPayrollDeficitBar_0");
+
+        var visibleNames = diagnostics.VisibleElementNames.ToList();
+        var overlayIndex = visibleNames.IndexOf("OverlayToggleGroup");
+        var spectatorIndex = visibleNames.IndexOf("SpectatorControlsPanel");
+        var standingsIndex = visibleNames.IndexOf("StandingsPanel");
+        Assert.True(overlayIndex >= 0);
+        Assert.True(spectatorIndex > overlayIndex);
+        Assert.True(standingsIndex > spectatorIndex);
+        Assert.True(visibleNames.IndexOf("StandingEconomySection") > visibleNames.IndexOf("StandingBattlefieldSection"));
     }
 
     [Fact]
@@ -223,10 +342,12 @@ public sealed class MenuAndGameplayTests : IAsyncLifetime
         Assert.Contains(map.CityOwners, city => city.OwnerId >= 0);
         Assert.True(map.TerritoryBoundaryCount > 0);
         var diagnostics = GameQueryHelpers.GetUiDiagnostics(_fixture.Context);
-        Assert.Equal(map.CityMarkerCount, diagnostics.VisibleElementNames.Count(name => name.StartsWith("MapCity_", StringComparison.Ordinal)));
+        var mapTargets = GameQueryHelpers.GetMapInteractionTargets(_fixture.Context);
+        Assert.Equal(map.CityMarkerCount, mapTargets.Count(target => target.Kind == "City"));
+        Assert.DoesNotContain(diagnostics.VisibleElementNames, name => name.StartsWith("MapCity_", StringComparison.Ordinal));
         Assert.DoesNotContain(diagnostics.VisibleElementNames, name => name.StartsWith("MapCityBack_", StringComparison.Ordinal));
         Assert.True(map.UnitMarkerCount >= 5);
-        Assert.Equal(5, map.CommanderMarkerCount);
+        Assert.Equal(10, map.CommanderMarkerCount);
         Assert.Equal(5, map.GeneralMarkerCount);
         Assert.Equal(map.UnitMarkerCount, map.OccupiedCellCount);
         Assert.Equal(0, map.DuplicateOccupiedCellCount);
@@ -237,16 +358,17 @@ public sealed class MenuAndGameplayTests : IAsyncLifetime
     {
         GameQueryHelpers.StartMatch(_fixture.Context, seed: 31, aiPlayers: 4);
         var before = GameQueryHelpers.GetTerritoryBoundaries(_fixture.Context).Count;
-        var after = before;
-
-        for (var i = 0; i < 12 && after == before; i++)
-        {
-            GameQueryHelpers.StepTicks(_fixture.Context, 12);
-            after = GameQueryHelpers.GetTerritoryBoundaries(_fixture.Context).Count;
-        }
+        var stepped = GameQueryHelpers.StepUntil(
+            _fixture.Context,
+            "TerritoryBoundaryCountNotEqual",
+            before.ToString(),
+            maxTicks: 144,
+            stepSize: 12);
+        var after = GameQueryHelpers.GetTerritoryBoundaries(_fixture.Context).Count;
 
         var diagnostics = GameQueryHelpers.GetUiDiagnostics(_fixture.Context);
         Assert.True(before > 0);
+        Assert.True(stepped.Satisfied, stepped.Detail);
         Assert.NotEqual(before, after);
         Assert.DoesNotContain(diagnostics.VisibleElementNames, name => name.StartsWith("TerritoryBoundary_", StringComparison.Ordinal));
     }
@@ -260,7 +382,8 @@ public sealed class MenuAndGameplayTests : IAsyncLifetime
 
         var diagnostics = GameQueryHelpers.GetUiDiagnostics(_fixture.Context);
 
-        Assert.True(game.MapCity(0).IsVisible());
+        Assert.True(game.MapCanvas.IsVisible());
+        Assert.DoesNotContain(diagnostics.VisibleElementNames, name => name.StartsWith("MapCity_", StringComparison.Ordinal));
         Assert.DoesNotContain(diagnostics.VisibleElementNames, name => name.StartsWith("MapCityBack_", StringComparison.Ordinal));
         Assert.DoesNotContain(diagnostics.VisibleElementNames, name => name == "CityListPanel");
         Assert.DoesNotContain(diagnostics.VisibleElementNames, name => name.StartsWith("CityButton_", StringComparison.Ordinal));
@@ -274,9 +397,15 @@ public sealed class MenuAndGameplayTests : IAsyncLifetime
         var before = GameQueryHelpers.GetMapState(_fixture.Context);
         var beforeOwnedCount = before.CityOwners.Count(city => city.OwnerId != GameConstants.NeutralPlayerId);
 
-        GameQueryHelpers.StepTicks(_fixture.Context, 80);
+        var stepped = GameQueryHelpers.StepUntil(
+            _fixture.Context,
+            "CityOwnedCountGreaterThan",
+            beforeOwnedCount.ToString(),
+            maxTicks: 120,
+            stepSize: 4);
         var after = GameQueryHelpers.GetMapState(_fixture.Context);
 
+        Assert.True(stepped.Satisfied, stepped.Detail);
         Assert.Equal(after.CityMarkerCount, after.CityOwners.Count);
         Assert.True(after.CityOwners.Count(city => city.OwnerId != GameConstants.NeutralPlayerId) > beforeOwnedCount);
         Assert.Equal(0, after.DuplicateOccupiedCellCount);
@@ -346,21 +475,16 @@ public sealed class MenuAndGameplayTests : IAsyncLifetime
         GameQueryHelpers.StartMatch(_fixture.Context, seed: 31, aiPlayers: 4);
         GameQueryHelpers.StepTicks(_fixture.Context, 12);
 
-        var sawDiagonalMove = false;
-        for (var i = 0; i < 30; i++)
-        {
-            GameQueryHelpers.StepTicks(_fixture.Context, 1);
-            var visuals = GameQueryHelpers.GetUnitVisuals(_fixture.Context);
-            if (visuals.Any(IsDiagonalVisualTarget))
-            {
-                sawDiagonalMove = true;
-                break;
-            }
-        }
+        var stepped = GameQueryHelpers.StepUntil(
+            _fixture.Context,
+            "AnyDiagonalVisualTarget",
+            maxTicks: 30);
+        var visuals = GameQueryHelpers.GetUnitVisuals(_fixture.Context);
 
         var map = GameQueryHelpers.GetMapState(_fixture.Context);
         Assert.Equal(0, map.DuplicateOccupiedCellCount);
-        Assert.True(sawDiagonalMove);
+        Assert.True(stepped.Satisfied, stepped.Detail);
+        Assert.Contains(visuals, IsDiagonalVisualTarget);
     }
 
     [Fact]
@@ -372,9 +496,13 @@ public sealed class MenuAndGameplayTests : IAsyncLifetime
         GameQueryHelpers.StepTicks(_fixture.Context, 1);
 
         var visuals = GameQueryHelpers.GetUnitVisuals(_fixture.Context);
-        for (var i = 0; i < 20 && !visuals.Any(unit => unit.IsInterpolating); i++)
+        if (!visuals.Any(unit => unit.IsInterpolating))
         {
-            GameQueryHelpers.StepTicks(_fixture.Context, 1);
+            var stepped = GameQueryHelpers.StepUntil(
+                _fixture.Context,
+                "AnyInterpolatingUnit",
+                maxTicks: 20);
+            Assert.True(stepped.Satisfied, stepped.Detail);
             visuals = GameQueryHelpers.GetUnitVisuals(_fixture.Context);
         }
 
@@ -390,20 +518,46 @@ public sealed class MenuAndGameplayTests : IAsyncLifetime
     {
         GameQueryHelpers.StartMatch(_fixture.Context, seed: 31, aiPlayers: 4);
 
-        var observedCombat = false;
-        for (var i = 0; i < 60; i++)
-        {
-            var snapshot = GameQueryHelpers.StepTicks(_fixture.Context, 4);
-            var map = GameQueryHelpers.GetMapState(_fixture.Context);
-            if (map.ActiveCombatCount > 0 ||
-                snapshot.LastEvent.Contains("attacked", StringComparison.OrdinalIgnoreCase))
-            {
-                observedCombat = true;
-                break;
-            }
-        }
+        var stepped = GameQueryHelpers.StepUntil(
+            _fixture.Context,
+            "ActiveCombat",
+            maxTicks: 240,
+            stepSize: 4);
 
-        Assert.True(observedCombat);
+        Assert.True(stepped.Satisfied, stepped.Detail);
+    }
+
+    [Fact]
+    public void CombatVisualDiagnostics_ReportDamageAndDeathMarkers()
+    {
+        GameQueryHelpers.StartMatch(_fixture.Context, seed: 31, aiPlayers: 4);
+
+        var stepped = GameQueryHelpers.StepUntil(
+            _fixture.Context,
+            "RecentDeathMarker",
+            maxTicks: 900,
+            stepSize: 4);
+        var diagnostics = GameQueryHelpers.GetMapVisualDiagnostics(_fixture.Context);
+
+        Assert.True(stepped.Satisfied, stepped.Detail);
+        Assert.NotEmpty(diagnostics.CombatMarkers);
+        Assert.NotEmpty(diagnostics.DeathMarkers);
+        Assert.True(diagnostics.CombatMarkers.Count <= 96, $"combat marker count was {diagnostics.CombatMarkers.Count}");
+        Assert.True(diagnostics.DeathMarkers.Count <= 24, $"death marker count was {diagnostics.DeathMarkers.Count}");
+        Assert.Contains(diagnostics.CombatMarkers, marker => marker.MarkerKind is "DamageFlash" or "LeaderThreatPulse" or "FatalHitFlash");
+        Assert.All(diagnostics.DeathMarkers, marker => Assert.Equal("Hidden", marker.MarkerKind));
+        Assert.All(diagnostics.CombatMarkers, marker =>
+        {
+            Assert.InRange(marker.MarkerX, 0, 1);
+            Assert.InRange(marker.MarkerY, 0, 1);
+            Assert.True(marker.Damage > 0);
+        });
+        Assert.All(diagnostics.DeathMarkers, marker =>
+        {
+            Assert.InRange(marker.MarkerX, 0, 1);
+            Assert.InRange(marker.MarkerY, 0, 1);
+            Assert.InRange(marker.AgeTicks, 0, 4);
+        });
     }
 
     [Fact]
@@ -441,15 +595,159 @@ public sealed class MenuAndGameplayTests : IAsyncLifetime
         GameQueryHelpers.StartMatch(_fixture.Context, seed: 12, aiPlayers: 4);
 
         var game = new GamePage(_fixture.Context);
-        game.MapCity(3).Click();
+        var city = GameQueryHelpers.GetMapInteractionTargets(_fixture.Context)
+            .Single(target => target.Kind == "City" && target.Id == 3);
+        var click = GameQueryHelpers.ClickMap(_fixture.Context, city.NormalizedX, city.NormalizedY);
         game.DefendButton.Click();
         game.HeavyPreferenceButton.Click();
 
         var snapshot = GameQueryHelpers.GetSnapshot(_fixture.Context);
 
+        Assert.Equal("City", click.Hit.Kind);
+        Assert.Equal(3, click.Hit.CityId);
         Assert.Equal(3, snapshot.HumanTargetCityId);
         Assert.Equal("Defend", snapshot.HumanDirective);
         Assert.True(snapshot.HumanLightPreference < 0.5);
+    }
+
+    [Fact]
+    public void MapHitTesting_ClicksUnitsCitiesAndCellsWithoutUiObjectButtons()
+    {
+        GameQueryHelpers.StartMatch(_fixture.Context, seed: 31, aiPlayers: 4);
+        var game = new GamePage(_fixture.Context);
+        game.AssertLoaded(true);
+
+        var targets = GameQueryHelpers.GetMapInteractionTargets(_fixture.Context);
+        var unitTarget = targets.First(target => target.Kind == "Unit");
+        var unitClick = GameQueryHelpers.ClickMap(_fixture.Context, unitTarget.NormalizedX, unitTarget.NormalizedY);
+
+        Assert.Equal("Unit", unitClick.Hit.Kind);
+        Assert.Equal(unitTarget.Id, unitClick.Hit.UnitId);
+        game.Target.AssertTextContains("Selected");
+        game.Target.AssertTextContains($"#{unitTarget.Id}");
+        game.Target.AssertTextContains("Command");
+
+        var cityTarget = targets.Single(target => target.Kind == "City" && target.Id == 3);
+        var cityClick = GameQueryHelpers.ClickMap(_fixture.Context, cityTarget.NormalizedX, cityTarget.NormalizedY);
+
+        Assert.Equal("City", cityClick.Hit.Kind);
+        Assert.Equal(3, cityClick.Hit.CityId);
+        Assert.Equal(3, cityClick.Snapshot.HumanTargetCityId);
+
+        var cellHit = GameQueryHelpers.HitTestMap(_fixture.Context, 0.01, 0.01);
+        Assert.Equal("Cell", cellHit.Kind);
+
+        var diagnostics = GameQueryHelpers.GetUiDiagnostics(_fixture.Context);
+        Assert.DoesNotContain(diagnostics.VisibleElementNames, name => name.StartsWith("MapCity_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void CommandChains_QueryDownLineAttackOrders()
+    {
+        GameQueryHelpers.StartMatch(_fixture.Context, seed: 31, aiPlayers: 4);
+        GameQueryHelpers.StepTicks(_fixture.Context, 12);
+
+        var chains = GameQueryHelpers.GetCommandChains(_fixture.Context);
+        var human = chains.Single(chain => chain.PlayerId == GameConstants.HumanPlayerId);
+
+        Assert.NotEmpty(human.Commanders);
+        Assert.All(human.Commanders, commander =>
+        {
+            Assert.NotNull(commander.GeneralCommand);
+            Assert.Equal("AttackRegion", commander.GeneralCommand!.CommandType);
+            Assert.NotNull(commander.GeneralCommand.TargetCellX);
+            Assert.NotNull(commander.GeneralCommand.TargetCellY);
+            Assert.All(commander.AssignedUnits, unit =>
+            {
+                Assert.NotNull(unit.Command);
+                Assert.Equal("AdvanceToCell", unit.Command!.CommandType);
+            });
+        });
+    }
+
+    [Fact]
+    public void ReserveGroupCommands_AreQueryableAndShownForGeneral()
+    {
+        var snapshot = GameQueryHelpers.StartMatch(_fixture.Context, seed: 31, aiPlayers: 4);
+        var commander = snapshot.Units.First(unit =>
+            unit.PlayerId == GameConstants.HumanPlayerId &&
+            unit.Kind == nameof(UnitKind.Commander) &&
+            unit.CommanderNumber == 1);
+        var general = snapshot.Units.First(unit =>
+            unit.PlayerId == GameConstants.HumanPlayerId &&
+            unit.Kind == nameof(UnitKind.General));
+
+        GameQueryHelpers.RecallCommanderGroup(_fixture.Context, commander.Id, groupSize: 1);
+        var recallChain = GameQueryHelpers.GetCommandChains(_fixture.Context)
+            .Single(chain => chain.PlayerId == GameConstants.HumanPlayerId);
+        var recall = Assert.Single(recallChain.ReserveCommands, command =>
+            command.CommandType == "RecallCommanderGroupToReserve");
+
+        Assert.NotNull(recall.TargetUnitId);
+        Assert.Equal(commander.CommanderNumber, recall.CommanderNumber);
+        Assert.Contains("manual-recall", recall.ReasonCode);
+
+        var game = new GamePage(_fixture.Context);
+        var generalTarget = GameQueryHelpers.GetMapInteractionTargets(_fixture.Context)
+            .Single(target => target.Kind == "Unit" && target.Id == general.Id);
+        GameQueryHelpers.ClickMap(_fixture.Context, generalTarget.NormalizedX, generalTarget.NormalizedY);
+        game.Target.AssertTextContains("Reserve");
+        game.Target.AssertTextContains("RecallCommanderGroupToReserve");
+
+        GameQueryHelpers.AssignReserveGroup(_fixture.Context, commander.Id, groupSize: 1);
+        var assignChain = GameQueryHelpers.GetCommandChains(_fixture.Context)
+            .Single(chain => chain.PlayerId == GameConstants.HumanPlayerId);
+        var assignment = Assert.Single(assignChain.ReserveCommands, command =>
+            command.CommandType == "AssignReserveGroup");
+
+        Assert.NotNull(assignment.TargetUnitId);
+        Assert.Equal(commander.CommanderNumber, assignment.CommanderNumber);
+        Assert.Contains("manual", assignment.ReasonCode);
+    }
+
+    [Fact]
+    public void MapVisualDiagnostics_ExposeUnitMoraleRolesTargetsAndEvents()
+    {
+        GameQueryHelpers.StartMatch(_fixture.Context, seed: 31, aiPlayers: 4);
+        GameQueryHelpers.StepTicks(_fixture.Context, 12);
+        GameQueryHelpers.TogglePause(_fixture.Context);
+
+        var diagnostics = GameQueryHelpers.GetMapVisualDiagnostics(_fixture.Context);
+        var unitIds = diagnostics.Units.Select(unit => unit.UnitId).ToList();
+
+        Assert.NotEmpty(diagnostics.Units);
+        Assert.Equal(unitIds.OrderBy(id => id).ToList(), unitIds);
+        Assert.All(diagnostics.Units, unit =>
+        {
+            Assert.InRange(unit.HealthRatio, 0, 1);
+            Assert.InRange(unit.Morale, 0, 1);
+            Assert.InRange(unit.MarkerX, 0, 1);
+            Assert.InRange(unit.MarkerY, 0, 1);
+            Assert.NotEmpty(unit.RoleFlags);
+            Assert.False(string.IsNullOrWhiteSpace(unit.VisualState));
+        });
+        Assert.Contains(diagnostics.Units, unit => unit.IsCommander && unit.CommanderNumber == 1 && unit.CenterLabel == "1" && unit.RoleFlags.Contains("Commander"));
+        Assert.Contains(diagnostics.Units, unit => !unit.IsLeader && unit.AssignedCommanderNumber == 1 && unit.CenterLabel == "1" && unit.RoleFlags.Contains("Commander 1"));
+        Assert.Contains(diagnostics.Units, unit => unit.IsReserve && unit.HasReservePip && string.IsNullOrEmpty(unit.CenterLabel) && unit.RoleFlags.Contains("Reserve"));
+        Assert.Contains(diagnostics.Units, unit => unit.IsGeneral && unit.RoleFlags.Contains("General"));
+        Assert.Contains(diagnostics.Units, unit => unit.TargetCityId.HasValue || unit.TargetRegionId.HasValue);
+        Assert.NotEmpty(diagnostics.RecentEvents);
+
+        var candidate = diagnostics.Units.First(unit => !unit.IsLeader);
+        var routed = GameQueryHelpers.SetUnitMorale(_fixture.Context, candidate.UnitId, 0.10)
+            .Units.Single(unit => unit.UnitId == candidate.UnitId);
+        var routRisk = GameQueryHelpers.SetUnitMorale(_fixture.Context, candidate.UnitId, 0.25)
+            .Units.Single(unit => unit.UnitId == candidate.UnitId);
+
+        Assert.Equal("Routed", routed.MoraleBand);
+        Assert.True(routed.IsRouted);
+        Assert.False(routed.IsRoutRisk);
+        Assert.Equal("RoutedBrokenRing", routed.VisualState);
+        Assert.Equal("RoutRisk", routRisk.MoraleBand);
+        Assert.False(routRisk.IsRouted);
+        Assert.True(routRisk.IsRoutRisk);
+        Assert.Equal("RoutRiskSegmentedArc", routRisk.VisualState);
+        Assert.NotEqual(routed.VisualState, routRisk.VisualState);
     }
 
     [Fact]

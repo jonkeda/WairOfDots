@@ -11,10 +11,17 @@ public sealed class GamePage(IStrideTestContext context) : PageObjectBase<GamePa
     public TextBlock<GamePage> Target => TextBlock("TargetDisplay");
     public TextBlock<GamePage> LastEvent => TextBlock("LastEventDisplay");
     public TextBlock<GamePage> Telemetry => TextBlock("TelemetryDisplay");
+    public TextBlock<GamePage> OverlayMode => TextBlock("OverlayModeDisplay");
     public TextBlock<GamePage> Speed => TextBlock("SpeedDisplay");
     public Panel<GamePage> HumanCommandPanel => Panel("HumanCommandPanel");
     public Panel<GamePage> SpectatorControlsPanel => Panel("SpectatorControlsPanel");
     public Panel<GamePage> StandingsPanel => Panel("StandingsPanel");
+    public Panel<GamePage> OverlayToggleGroup => Panel("OverlayToggleGroup");
+    public Button<GamePage> OverlayNormalButton => Button("OverlayNormalButton");
+    public Button<GamePage> OverlayEconomyButton => Button("OverlayEconomyButton");
+    public Button<GamePage> OverlayCommandButton => Button("OverlayCommandButton");
+    public Button<GamePage> OverlayVisibilityButton => Button("OverlayVisibilityButton");
+    public Button<GamePage> OverlayAiDebugButton => Button("OverlayAiDebugButton");
     public Button<GamePage> AttackButton => Button("AttackButton");
     public Button<GamePage> HoldButton => Button("HoldButton");
     public Button<GamePage> DefendButton => Button("DefendButton");
@@ -25,6 +32,4 @@ public sealed class GamePage(IStrideTestContext context) : PageObjectBase<GamePa
     public Button<GamePage> SpeedSlowButton => Button("SpeedSlowButton");
     public Button<GamePage> SpeedNormalButton => Button("SpeedNormalButton");
     public Button<GamePage> SpeedFastButton => Button("SpeedFastButton");
-
-    public Button<GamePage> MapCity(int cityId) => Button($"MapCity_{cityId}");
 }
